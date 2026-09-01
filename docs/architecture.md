@@ -177,6 +177,12 @@ treat phases 5–7 as obligatory.
 
 ---
 
+Confirmation UI constraints (recorded in Phase 1, from the T7 composition
+finding): must not be a toast; must be shown on all virtual desktops or
+pinned; must never default to allow on timeout; `open_new_desktop` is blocked
+while a confirmation is pending.
+
+
 ## 8. What this is not
 
 Recording these so they don't get relitigated at 2am six months in:

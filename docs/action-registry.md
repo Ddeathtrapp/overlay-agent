@@ -16,8 +16,11 @@ Windows exposes no public API. State lives in a serialized blob under
 is undocumented and has changed across Windows builds.
 *Rule:* attempt it, timebox it. If it resists, **stop and report** — do not
 shell out, do not install a third-party utility, do not script the Settings UI.
-Substitute `toggle_dark_mode` (a clean `AppsUseLightTheme` registry DWORD) as
-the Tier 0 exemplar and move on. Phase 1 must not block on this action.
+Substitute `toggle_dark_mode` as the Tier 0 exemplar and move on. It writes
+two plain DWORDs under `HKCU\...\Themes\Personalize`: `AppsUseLightTheme` and
+`SystemUsesLightTheme`. Both are required — writing only the first leaves the
+taskbar and Start menu unflipped. Both are cosmetic and reversible; the
+design-test answer covers both. Phase 1 must not block on this action.
 
 **0.2 — `open_application` is the highest-risk action in the registry.**
 It is the one action where a dictionary key can quietly become a path, and a
@@ -213,6 +216,12 @@ confirmation, not "just for development."
 - `modify_security_settings` — Defender, firewall, UAC, BitLocker
 - `open_url(str)` — free-form URL is a string parameter wearing a costume
 - Anything accepting a path
+- Any action that synthesizes a keystroke, mouse event, or window message not
+  fully fixed at build time. A `press_hotkey(chord: HotkeyChord)` passes every
+  §3 check — finite domain, enum member, defined in source — while
+  `HotkeyChord.WIN_R` is arbitrary command execution. **§3 bounds the size of
+  a parameter's domain, not the authority of its members.** The type system is
+  necessary, not sufficient; the registry's contents are the guarantee.
 
 **Why this list exists in writing:** at some point a feature will be annoying
 to implement with typed actions and one of these will look like a reasonable
@@ -248,7 +257,7 @@ path, not coverage.
   string.
 
 ```python
-APPS: Final[dict[str, Path]] = {
+APPS: Final[Mapping[str, Path]] = {
     "notepad": Path(r"C:\Windows\System32\notepad.exe"),
     "calculator": Path(r"C:\Windows\System32\calc.exe"),
     # extend by hand, one reviewed line at a time
@@ -261,8 +270,10 @@ APPS: Final[dict[str, Path]] = {
 - **Implementation:** `SettingPage` enum mapping to hardcoded `ms-settings:`
   URIs. Never construct the URI from input.
 - **Excluded pages:** Windows Security, Firewall, UAC, BitLocker, Sign-in
-  options. These are on the exclusion list in spirit — opening them is a step
-  toward disabling protections and is not a convenience worth having.
+  options, **Apps**, **Network**. The first five are a step toward disabling
+  protections. Apps is where software is uninstalled; Network is one click
+  from proxy configuration, which redirects traffic. All are reachable by
+  hand in two clicks — the convenience is not worth the surface.
 
 ### `shutdown_pc` / `restart_pc`
 - **Tier** 2 · **Params** none · **Reversible** **no**

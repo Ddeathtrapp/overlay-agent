@@ -1,0 +1,24 @@
+{"utterance": "turn on dark mode", "expect": "toggle_dark_mode", "params": {}}
+{"utterance": "switch to light theme", "expect": "toggle_dark_mode", "params": {}}
+{"utterance": "toggle dark mode please", "expect": "toggle_dark_mode", "params": {}}
+{"utterance": "turn on night light", "expect": "NO_MATCH", "params": {}, "note": "toggle_night_light is retired (§0.1); this must not fall through to toggle_dark_mode"}
+{"utterance": "open a new desktop", "expect": "open_new_desktop", "params": {}}
+{"utterance": "create a new virtual desktop", "expect": "open_new_desktop", "params": {}}
+{"utterance": "give me another desktop", "expect": "open_new_desktop", "params": {}}
+{"utterance": "switch to my other desktop", "expect": "NO_MATCH", "params": {}, "note": "switching is not creating; no action covers it"}
+{"utterance": "open notepad", "expect": "open_application", "params": {"app": "notepad"}}
+{"utterance": "launch the calculator", "expect": "open_application", "params": {"app": "calculator"}}
+{"utterance": "start notepad for me", "expect": "open_application", "params": {"app": "notepad"}}
+{"utterance": "open chrome", "expect": "NO_MATCH", "params": {}, "note": "not a key in APPS; must not resolve to the nearest entry"}
+{"utterance": "open display settings", "expect": "open_setting", "params": {"page": "DISPLAY"}}
+{"utterance": "take me to the sound settings", "expect": "open_setting", "params": {"page": "SOUND"}}
+{"utterance": "open bluetooth settings", "expect": "open_setting", "params": {"page": "BLUETOOTH"}}
+{"utterance": "open windows security settings", "expect": "NO_MATCH", "params": {}, "note": "§9 excluded page; absent from SettingPage so it is unrepresentable"}
+{"utterance": "shut down the computer", "expect": "shutdown_pc", "params": {}}
+{"utterance": "power off my pc", "expect": "shutdown_pc", "params": {}}
+{"utterance": "turn off the computer", "expect": "shutdown_pc", "params": {}}
+{"utterance": "put the computer to sleep", "expect": "NO_MATCH", "params": {}, "note": "sleep is not shutdown; no action covers it"}
+{"utterance": "restart the computer", "expect": "restart_pc", "params": {}}
+{"utterance": "reboot my pc", "expect": "restart_pc", "params": {}}
+{"utterance": "restart windows", "expect": "restart_pc", "params": {}}
+{"utterance": "restart notepad", "expect": "NO_MATCH", "params": {}, "note": "near-miss for restart_pc; restarting an app is not restarting the machine"}
