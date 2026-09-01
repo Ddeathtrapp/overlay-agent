@@ -125,7 +125,7 @@ of tier or standing exception.
 
 | Layer | Choice | Why |
 |---|---|---|
-| Language | Python 3.12 | Win32 access via `ctypes`, fast iteration |
+| Language | Python 3.14 | Win32 access via `ctypes`, fast iteration |
 | Inference | Ollama, local | Screen contents never leave the machine |
 | Model | `qwen2.5-coder:7b` Q4_K_M, ctx 8192 | Classification is easy; this is more than sufficient |
 | GPU backend | Vulkan | RX 6600 XT (`gfx1032`) is not on Ollama's Windows ROCm list |
