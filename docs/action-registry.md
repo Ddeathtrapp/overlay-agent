@@ -31,11 +31,11 @@ concatenated, or passed to a shell. `subprocess` is called with a list and
 `shell=False`, using the `Path` value from the dict — never the key, never
 anything derived from input. Mandatory human review before merge.
 
-**0.3 — §12 is unanswered and must stay that way until a human answers it.**
-Those four decisions define the policy engine's shape. The recommendations in
-§12 are defaults for discussion, **not decisions**. Agents must not implement
-against them, and must not treat a recommendation as settled. If a task
-requires one of these answers, stop and ask.
+**0.3 — §12 is answered. Implement against it.**
+The four open questions in §12 were resolved by the human on 2026-09-01 and
+are now decisions, not recommendations: exceptions are permanent until
+revoked (12.1), rate limits are per-action (12.2), there is no idle-based
+revocation (12.3), and execution is serial (12.4). Read §12 as spec.
 
 ---
 
@@ -317,17 +317,33 @@ is the boundary.
 
 ---
 
-## 12. Open questions — UNANSWERED
+## 12. Decisions
 
-**Blocking Phase 2. Human decision required. See §0.3.** The recommendations
-below are starting points for discussion, not decisions. Do not implement
-against them.
+Answered. These define the policy engine's shape and are no longer open.
 
-- **Exception persistence:** do Tier 1 exceptions survive a restart, or expire?
-  Recommendation: expire after 24h, forcing periodic reconsideration.
-- **Rate limit granularity:** global, per-tier, or per-action? Per-action is
-  more work but bounds the nuisance case tightly.
-- **Dead-man switch threshold:** after how long with no human interaction do
-  all exceptions auto-revoke? Recommendation: 30 minutes.
-- **Concurrency:** can two actions be in flight at once? Recommendation: no —
-  a serial queue removes an entire class of race condition for near-zero cost.
+**12.1 — Exception persistence: permanent until revoked.**
+An exception is scoped to `(action_id + exact parameter value)` and Tier 2 can
+never be excepted, so the worst standing grant is a Tier 0/1 action running
+without a prompt. Time-based expiry would nag without reducing that.
+
+*Requirement in place of expiry:* the policy engine must expose the full list
+of active exceptions — action, parameter, when granted — and allow revoking
+any of them individually or all at once. Standing permissions that cannot be
+inspected are the actual risk; duration is not.
+
+**12.2 — Rate limits: per-action.**
+Each action carries its own limit. A global cap means one spammed Tier 0
+action starves everything else, which is the failure mode T8 describes.
+Defaults: Tier 0 — 10/min. Tier 1 — 5/min. Tier 2 — 1 per 10 min, hard.
+Limits live in the registry entry, not in the policy engine.
+
+**12.3 — No idle-based revocation.**
+Exceptions do not expire on inactivity. The threat this would address is not
+the user at their own desk; it is a phone session in someone else's hands,
+which is a transport concern (see threat-model.md T5) and is handled by
+session expiry there. The policy engine tracks exceptions, not presence.
+
+**12.4 — Serial execution.**
+One action at a time, FIFO queue. Removes an entire class of race condition
+for near-zero cost. Nothing in the design requires parallel actions. A second
+request arriving while one is in flight queues; it does not interleave.

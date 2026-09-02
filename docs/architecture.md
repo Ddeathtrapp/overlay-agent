@@ -145,7 +145,7 @@ inference it is no longer a binding constraint.
 
 | Path | Owner | Notes |
 |---|---|---|
-| `src/policy/` | **Human only** | Agents must not create, modify, or delete |
+| `src/policy/` | **Human-owned** | No agent may create, modify, or delete. Drafted in review with Claude in chat, pasted and understood by the human before commit. |
 | `src/actions/` | `registry-engineer` | Human review required per action |
 | `src/dispatch/` | `registry-engineer` | Human review — it touches the boundary |
 | `src/classifier/` | `classifier-engineer` | — |

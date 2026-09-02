@@ -38,7 +38,7 @@ unacceptable, do not write it — report back instead.
 
 ## Stop and report, do not work around
 - A required tool or dependency is missing. Never install anything.
-- The spec is ambiguous or an §12 open question blocks you.
+- The spec is ambiguous
 - The only way to implement something is with a string parameter.
 - `toggle_night_light` resists implementation — see `action-registry.md` §0.1.
   Timebox it; substitute `toggle_dark_mode` and move on.

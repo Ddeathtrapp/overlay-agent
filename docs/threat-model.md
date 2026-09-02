@@ -100,9 +100,14 @@ registry is closed, ordinary appsec becomes the dominant threat.
 
 ### T5 — Stolen token or phone
 **Vector:** A3.
-**Mitigation:** Tier 2 actions require typed confirmation, not a tap. Dead-man
-switch revokes standing exceptions after inactivity. Short session expiry.
-Audit log makes abuse visible after the fact.
+**Mitigation:** Tier 2 actions require typed confirmation, not a tap, and can
+never be excepted. **Session expiry carries the full load here** — §12.3
+removed idle-based exception revocation, on the reasoning that the threat is a
+phone session in someone else's hands rather than the user's own idle desk.
+That makes short session lifetime and prompt re-authentication a transport
+requirement, not a nice-to-have. The policy engine must also expose the active
+exception list for inspection and revocation (§12.1). Audit log makes abuse
+visible after the fact.
 **Residual:** an attacker with a valid session can invoke Tier 0/1 actions.
 Bounded by the registry — annoying, not catastrophic.
 
@@ -138,10 +143,21 @@ single control.
 **Mitigation:** Per-action rate limits. `shutdown`/`restart` capped at 1 per
 10 minutes, hard. Serial action queue.
 **Residual:** low-severity nuisance.
+the sliding window is in-memory, so a process restart clears
+it. Out of scope today (restarting requires A6-level access), but becomes
+in-scope at Phase 5 when the service auto-restarts on crash — a crash loop
+would then reset limits without code execution. Fix at Phase 5: persist a
+wall-clock `blocked_until` for tier 2 only, keeping monotonic for the
+sliding window. Clock rollback then over-blocks rather than under-blocks.
 
 ### T9 — Screen contents leaving the machine
 **Vector:** design choice, not an attacker.
-**Mitigation:** Inference is local. No cloud API in the dispatch path.
+**Mitigation:** Inference is local. No cloud API in the dispatch path. The
+audit log never records the utterance when `source is SCREEN_CONTEXT`
+(audit.py `_safe_utterance`), so OCR'd screen text — which may contain
+passwords, email, or private documents — is never written to a long-lived
+file. Parameters remain loggable because §3 restricts them to enum members,
+bounded ints, and whitelist keys, none of which can carry arbitrary text.
 **Residual:** none, so long as the local-inference decision holds.
 
 ### T10 — The agent-built system builds something unsafe
@@ -155,6 +171,27 @@ call rather than prompting), agent conduct rules in `CLAUDE.md`, human review
 of all boundary code, git branch per agent run.
 **Residual:** conduct rules are instructions to a model, not enforcement. The
 tool allowlists are the actual fence.
+
+### T12 - Where an ActionRequest came from.
+    This is load-bearing. threat-model.md §4 T1 assumes screen content is
+    hostile at all times: an attacker can place instruction-shaped text
+    anywhere the OCR pipeline will read it.
+
+    Two rules govern this field, and both are security-critical:
+
+    1. It is stamped by the ENTRY POINT and by nothing else. The CLI
+       hardcodes DESKTOP; the transport hardcodes PHONE. It never arrives
+       in a request payload, is never a classifier output field, and is
+       never derived from anything the model produced. A caller that could
+       choose its own Source could stamp DESKTOP on a hostile request and
+       the provenance rule would be worthless.
+
+    2. It describes where the PARAMETERS came from, not where the utterance
+       came from. "Open the app named on screen" is SCREEN_CONTEXT even
+       though the human typed it, because OCR supplied the value.
+
+    `trusted` does not mean auto-allowed. Tier rules apply regardless; it
+    only means the request is not FORCED to confirm on provenance grounds.
 
 ---
 
