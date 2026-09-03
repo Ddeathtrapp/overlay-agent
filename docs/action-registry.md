@@ -142,6 +142,14 @@ eliminated in §3.
 after three weeks you will tap Yes without reading. Requiring a typed word for
 irreversible actions is the only mechanism here that resists that.
 
+**A Tier 2 action may not originate from an untrusted source.** Confirmation
+is not offered — the request is rejected outright. There is no legitimate flow
+in which OCR'd screen text proposes shutting down the machine, and prompting
+for one is itself a nuisance vector. This is stricter than the general
+provenance rule in §6, which only forces confirmation.
+
+
+
 ---
 
 ## 6. Dispatch flow
