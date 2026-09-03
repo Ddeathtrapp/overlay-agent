@@ -64,11 +64,31 @@ class ConfirmationPrompt:
 @dataclass(frozen=True, slots=True)
 class ConfirmationReply:
     """What came back. `approved` alone is never sufficient for tier 2 —
-    see `Confirmer.verify`."""
+    see `Confirmer.verify`.
+
+    Validated at construction, like Decision. Without this, `approved` is
+    truthiness-tested: a JSON reply of {"approved": "false"} from a phone
+    would approve the action, because the string "false" is truthy. A
+    deserialised reply must not be able to mean the opposite of what it says.
+    """
 
     approved: bool
     typed: str | None = None
     remember: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.approved, bool):
+            raise TypeError(
+                f"approved must be a bool, got {type(self.approved).__name__}"
+            )
+        if not isinstance(self.remember, bool):
+            raise TypeError(
+                f"remember must be a bool, got {type(self.remember).__name__}"
+            )
+        if self.typed is not None and not isinstance(self.typed, str):
+            raise TypeError(
+                f"typed must be a str or None, got {type(self.typed).__name__}"
+            )
 
 
 class Confirmer(ABC):
@@ -185,6 +205,7 @@ def build_prompt(
     params: Mapping[str, str],
     tier: int,
     source_label: str,
+    source_trusted: bool,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
 ) -> ConfirmationPrompt:
     """Assemble a prompt with the tier rules already applied.
@@ -193,6 +214,12 @@ def build_prompt(
     random string proves the human is present; typing the action name
     proves they read WHAT they are approving, which is the failure mode
     T6 actually describes.
+
+    `source_trusted` is required, not defaulted. An untrusted request may
+    be confirmed, but it must never be able to create a standing exception:
+    the engine stops screen context from USING an exception, and this stops
+    it from MAKING one. With §12.3 removing expiry, one habituated "always"
+    on a screen-driven prompt would be permanent.
     """
     is_tier_two = int(tier) >= TIER_TWO
     return ConfirmationPrompt(
@@ -202,6 +229,6 @@ def build_prompt(
         tier=int(tier),
         source_label=source_label,
         challenge=action_id if is_tier_two else None,
-        allow_remember=not is_tier_two,
+        allow_remember=not is_tier_two and source_trusted,
         timeout_seconds=timeout_seconds,
     )

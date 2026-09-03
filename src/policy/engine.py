@@ -287,6 +287,7 @@ class PolicyEngine:
             params={k: str(v) for k, v in parsed.items()},
             tier=tier,
             source_label=_SOURCE_LABELS[request.source],
+            source_trusted=request.source.trusted,
         )
 
         if isinstance(self._confirmer, NullConfirmer):
@@ -296,7 +297,18 @@ class PolicyEngine:
                 "no confirmation interface is attached",
             )
 
-        reply = self._confirmer.ask(prompt)
+        try:
+            reply = self._confirmer.ask(prompt)
+        except Exception as exc:
+            # A confirmer that raises — including one returning a reply that
+            # fails ConfirmationReply's type checks — must be a denial, not
+            # an unhandled crash out of the engine.
+            log.exception("confirmation interface failed for %s", action.id)
+            return Decision.reject(
+                request,
+                RejectionCode.NOT_CONFIRMED,
+                f"confirmation interface failed: {exc!r}",
+            )
 
         if not Confirmer.verify(prompt, reply):
             return Decision.reject(
