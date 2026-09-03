@@ -23,9 +23,9 @@ from unittest.mock import patch
 
 from _helpers import StubConfirmer, build_engine
 
-from actions.handlers import desktops, settings
+from actions.handlers import desktops, power, settings
 from actions.params import SettingPage
-from policy.confirm import ConfirmationReply
+from policy.confirm import Confirmer, ConfirmationPrompt, ConfirmationReply
 from policy.types import Outcome, RejectionCode, Source
 
 CHORD_LENGTH = 6  # Win+Ctrl+D: 3 key-down + 3 key-up, see test_handlers.py
@@ -143,3 +143,182 @@ def test_tier_two_approved_without_typed_challenge_is_rejected(tmp_path) -> None
     assert result.decision.outcome is Outcome.REJECTED
     assert result.decision.code is RejectionCode.NOT_CONFIRMED
     assert not result.executed
+
+
+# --- tier 2: the typed challenge, end to end through the engine ------------
+#
+# The single pre-existing tier-2 test above only ever supplied `typed=None`,
+# so `Confirmer.verify` could have been `return reply.typed is not None` and
+# every test in this file would still pass. The tests below pin the actual
+# rule: the typed word must equal the action id, case-sensitively, with only
+# surrounding whitespace forgiven -- and, on a correct reply, the handler
+# genuinely runs (real shutdown API patched, never called for real).
+
+
+def test_tier_two_correct_typed_word_allows_and_executes(tmp_path) -> None:
+    confirmer = StubConfirmer(ConfirmationReply(approved=True, typed="shutdown_pc"))
+    engine, store, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW", return_value=1) as shutdown_api:
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert confirmer.call_count == 1
+    assert result.decision.outcome is Outcome.CONFIRMED
+    assert result.executed
+    assert result.ok
+    shutdown_api.assert_called_once()
+    # Tier 2 can never be excepted, confirmed or not.
+    assert store.list() == []
+
+
+def test_tier_two_wrong_typed_word_refuses_and_does_not_execute(tmp_path) -> None:
+    confirmer = StubConfirmer(ConfirmationReply(approved=True, typed="definitely not it"))
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW") as shutdown_api:
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert result.decision.outcome is Outcome.REJECTED
+    assert result.decision.code is RejectionCode.NOT_CONFIRMED
+    assert not result.executed
+    shutdown_api.assert_not_called()
+
+
+def test_tier_two_typed_word_whitespace_is_forgiven(tmp_path) -> None:
+    confirmer = StubConfirmer(ConfirmationReply(approved=True, typed="  shutdown_pc  "))
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW", return_value=1) as shutdown_api:
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert result.decision.outcome is Outcome.CONFIRMED
+    assert result.executed
+    shutdown_api.assert_called_once()
+
+
+def test_tier_two_typed_word_case_mismatch_refuses(tmp_path) -> None:
+    confirmer = StubConfirmer(ConfirmationReply(approved=True, typed="SHUTDOWN_PC"))
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW") as shutdown_api:
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert result.decision.outcome is Outcome.REJECTED
+    assert result.decision.code is RejectionCode.NOT_CONFIRMED
+    shutdown_api.assert_not_called()
+
+
+def test_tier_two_approved_false_with_correct_typed_word_still_refuses(tmp_path) -> None:
+    confirmer = StubConfirmer(ConfirmationReply(approved=False, typed="shutdown_pc"))
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW") as shutdown_api:
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert result.decision.outcome is Outcome.REJECTED
+    assert result.decision.code is RejectionCode.NOT_CONFIRMED
+    shutdown_api.assert_not_called()
+
+
+def test_tier_two_prompt_challenge_is_the_action_id_tier_one_has_none(tmp_path) -> None:
+    confirmer = StubConfirmer(
+        ConfirmationReply(approved=False),  # for open_setting, tier 1
+        ConfirmationReply(approved=True, typed="shutdown_pc"),  # for shutdown_pc
+    )
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    engine.execute("open_setting", {"page": "display"}, source=Source.DESKTOP)
+    with patch.object(power, "_InitiateSystemShutdownExW", return_value=1):
+        engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert confirmer.call_count == 2
+    tier_one_prompt, tier_two_prompt = confirmer.prompts
+    assert tier_one_prompt.tier == 1
+    assert tier_one_prompt.challenge is None
+    assert tier_two_prompt.tier == 2
+    assert tier_two_prompt.challenge == "shutdown_pc"
+
+
+def test_tier_two_prompt_never_allows_remember_and_confirming_grants_no_exception(
+    tmp_path,
+) -> None:
+    confirmer = StubConfirmer(
+        ConfirmationReply(approved=True, typed="shutdown_pc", remember=True)
+    )
+    engine, store, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(power, "_InitiateSystemShutdownExW", return_value=1):
+        result = engine.execute("shutdown_pc", {}, source=Source.DESKTOP)
+
+    assert result.decision.outcome is Outcome.CONFIRMED
+    assert confirmer.prompts[0].allow_remember is False
+    # A UI that sent remember=True anyway must not have created a standing
+    # exception -- §5 forbids excepting tier 2 no matter what the reply says.
+    assert store.list() == []
+
+
+# --- the review's most severe finding: screen-context "always allow" -------
+#
+# A SCREEN_CONTEXT (untrusted) request confirmed with remember=True MUST
+# create NO standing exception. build_prompt() sets allow_remember=False for
+# any untrusted source, so may_remember() already refuses -- this test pins
+# the observable END-TO-END behaviour rather than the flag, because a
+# regression here would mean one habituated "always allow" tap on
+# attacker-controlled screen text becomes a PERMANENT bypass: §12.1 removed
+# exception expiry, so there would be no time-based recovery from it either.
+
+
+def test_screen_context_confirm_with_remember_creates_no_exception(tmp_path) -> None:
+    confirmer = StubConfirmer(
+        ConfirmationReply(approved=True, remember=True),  # screen context, tier 1
+        ConfirmationReply(approved=False),  # later desktop request
+    )
+    engine, store, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(settings.os, "startfile"):
+        first = engine.execute(
+            "open_setting", {"page": "display"}, source=Source.SCREEN_CONTEXT
+        )
+
+    assert first.decision.outcome is Outcome.CONFIRMED
+    assert confirmer.call_count == 1
+    assert store.list() == [], "screen-context confirm must not create a standing exception"
+
+    # If a standing exception HAD been created, this DESKTOP request for the
+    # exact same action/params would auto-allow without asking. It must
+    # still prompt.
+    second = engine.execute(
+        "open_setting", {"page": "display"}, source=Source.DESKTOP
+    )
+    assert confirmer.call_count == 2, "a later trusted request must still be asked"
+    assert second.decision.outcome is Outcome.REJECTED
+
+
+# --- a confirmer that raises is a denial, never an unhandled crash ---------
+
+
+class _RaisingConfirmer(Confirmer):
+    """Simulates a broken UI: `.ask()` blows up instead of answering."""
+
+    def __init__(self) -> None:
+        self.asked = False
+
+    def ask(self, prompt: ConfirmationPrompt) -> ConfirmationReply:
+        self.asked = True
+        raise RuntimeError("UI crashed mid-prompt")
+
+
+def test_confirmer_that_raises_is_treated_as_not_confirmed(tmp_path) -> None:
+    confirmer = _RaisingConfirmer()
+    engine, _, _ = build_engine(tmp_path, confirmer)
+
+    with patch.object(settings.os, "startfile") as startfile:
+        result = engine.execute(
+            "open_setting", {"page": "display"}, source=Source.DESKTOP
+        )
+
+    assert confirmer.asked
+    assert result.decision.outcome is Outcome.REJECTED
+    assert result.decision.code is RejectionCode.NOT_CONFIRMED
+    assert not result.executed
+    startfile.assert_not_called()
