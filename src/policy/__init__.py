@@ -1,1 +1,1 @@
-'"""Policy engine — the security boundary. Human-owned; no agent writes here."""' | Out-File -Encoding utf8 src/policy/__init__.py
+"""Policy engine — the security boundary. Human-owned; no agent writes here."""

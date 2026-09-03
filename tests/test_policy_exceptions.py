@@ -179,8 +179,12 @@ def test_grant_describe_parameterless() -> None:
 
 
 def test_grant_describe_with_params() -> None:
+    # describe() now includes the parameter NAME, not just its value, so a
+    # human reading the exception list can tell which parameter a value
+    # belongs to at a glance (see confirm.py's ConfirmationPrompt.summary()
+    # docstring for the same reasoning applied to confirmation prompts).
     grant = Grant("open_app", (("app", "str:notepad"),), datetime.now(timezone.utc))
-    assert grant.describe() == "open_app notepad"
+    assert grant.describe() == "open_app app=notepad"
 
 
 def test_grant_to_json_from_json_round_trip() -> None:
