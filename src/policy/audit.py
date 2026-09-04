@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
-from .types import ActionRequest, Decision, Outcome, Source
+from .types import ActionRequest, Decision, Outcome, RejectionCode, Source
 
 log = logging.getLogger(__name__)
 
@@ -68,9 +68,44 @@ def _safe_utterance(request: ActionRequest) -> str | None:
     return request.utterance
 
 
-def _params_for_log(params: Mapping[str, object]) -> dict[str, str]:
-    return {str(k): str(v) for k, v in params.items()}
+def _params_for_log(request: ActionRequest) -> dict[str, str]:
+    """Parameter values, redacted when the source is untrusted.
 
+    §3 restricts VALID parameters to enum members, bounded ints, and
+    whitelist keys — all registry constants, all safe. But this logs
+    `raw_params`, which is pre-parse: a rejected value is arbitrary text
+    that never had to satisfy any of that. From screen context, arbitrary
+    text is whatever was on the monitor.
+
+    Keys are always logged. They come from the action's own ParamSpec.
+    """
+    if request.source is Source.SCREEN_CONTEXT:
+        return {str(k): "<redacted>" for k in request.raw_params}
+    return {str(k): str(v) for k, v in request.raw_params.items()}
+
+
+def _safe_reason(request: ActionRequest, decision: Decision) -> str:
+    """Rejection reasons embed the offending value — `ParamRejected` says
+    which value failed, which is the whole point of the message and
+    exactly what must not be written for an untrusted source. The code
+    already carries the category, so nothing diagnostic is lost."""
+    if request.source is not Source.SCREEN_CONTEXT:
+        return decision.reason
+    if decision.code is not None:
+        return f"rejected: {decision.code.value} (detail redacted: untrusted source)"
+    return f"{decision.outcome.value} (detail redacted: untrusted source)"
+
+
+def _safe_action_id(request: ActionRequest, decision: Decision) -> str:
+    """An UNKNOWN_ACTION id is by definition not in the registry — it is
+    whatever the caller sent. From screen context that is arbitrary text.
+    Every other id is a registry constant and always safe to log."""
+    if (
+        request.source is Source.SCREEN_CONTEXT
+        and decision.code is RejectionCode.UNKNOWN_ACTION
+    ):
+        return "<redacted>"
+    return request.action_id
 
 # --------------------------------------------------------------------------
 # Records
@@ -141,14 +176,14 @@ class AuditLog:
                 request_id=request.request_id,
                 ts=datetime.now(timezone.utc),
                 payload={
-                    "action_id": request.action_id,
-                    "params": _params_for_log(request.raw_params),
+                    "action_id": _safe_action_id(request, decision),
+                    "params": _params_for_log(request),
                     "tier": tier,
                     "source": request.source.value,
                     "utterance": _safe_utterance(request),
                     "decision": decision.outcome.value,
                     "code": decision.code.value if decision.code else None,
-                    "reason": decision.reason,
+                    "reason": _safe_reason(request, decision),
                 },
             )
         )

@@ -156,9 +156,13 @@ sliding window. Clock rollback then over-blocks rather than under-blocks.
 audit log never records the utterance when `source is SCREEN_CONTEXT`
 (audit.py `_safe_utterance`), so OCR'd screen text — which may contain
 passwords, email, or private documents — is never written to a long-lived
-file. Parameters remain loggable because §3 restricts them to enum members,
-bounded ints, and whitelist keys, none of which can carry arbitrary text.
+file. Parameter values and rejection reasons are redacted the same way
+(`_params_for_log`, `_safe_reason`, `_safe_action_id`): `raw_params` is
+logged pre-parse, so a rejected value never had to satisfy §3 and is
+arbitrary text. Parameter names and known action ids are still logged —
+both are registry constants.
 **Residual:** none, so long as the local-inference decision holds.
+
 
 ### T10 — The agent-built system builds something unsafe
 **Vector:** the coding agents writing this application.
