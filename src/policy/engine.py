@@ -8,19 +8,21 @@ whether it happens.
 Read the whole thing. It is short on purpose (threat-model.md §5: "small
 enough to audit"), and every branch either rejects or narrows.
 
-Evaluation order, and why it is this order:
+Evaluation runs in three phases:
 
-    1. look up the action       unknown id cannot be reasoned about
-    2. check arity              before parsing, so errors are precise
-    3. parse parameters         via the registry's own ParamSpec
-    4. check the rate limit     BEFORE prompting, so the user is never
-                                asked about something already refused
-    5. decide if a human is needed
-    6. ask, and verify the reply
-    7. write the audit record   BEFORE execution
-    8. record the rate limit    only now, only on allow
-    9. call the handler
-   10. write the completion record
+    A. resolve and validate      under the gate
+       lookup, arity, parse, rate limit, permission
+       -> if no human is needed, execute here and return
+
+    B. ask the human             WITHOUT the gate
+       with a timeout, on a daemon thread
+
+    C. re-check and execute      under the gate again
+
+Phase B is outside the lock deliberately. Holding it across a prompt
+would let one unanswered dialog block every later request — tier 0
+included — before any of them were even audited. T8 is denial of
+service; a confirmation deadlock is the same outcome by accident.
 """
 
 from __future__ import annotations
@@ -34,7 +36,13 @@ from actions import lookup
 from actions.params import ParamRejected
 
 from .audit import AuditLog, AuditWriteFailed
-from .confirm import Confirmer, NullConfirmer, build_prompt
+from .confirm import (
+    ConfirmationPrompt,
+    ConfirmationReply,
+    Confirmer,
+    NullConfirmer,
+    build_prompt,
+)
 from .exceptions import ExceptionRefused, ExceptionStore
 from .limits import NoLimitConfigured, RateLimit, RateLimiter, default_for_tier
 from .types import ActionRequest, Decision, RejectionCode, Source
@@ -86,6 +94,7 @@ class PolicyEngine:
     `actions.lookup`, deliberately, so a swapped-in registry cannot change
     what executes.
     """
+
     def __init__(
         self,
         registry,
@@ -102,9 +111,10 @@ class PolicyEngine:
         self._exceptions = exceptions or ExceptionStore()
         self._limiter = limiter or RateLimiter(limits_from_registry(registry))
         self._audit = audit or AuditLog()
-        # §12.4: one action at a time. This guarantees no interleaving.
-        # It does not guarantee strict FIFO ordering — Python locks are not
-        # queued — which is acceptable at human request rates.
+        # §12.4: no two handlers run at once. The gate is held for
+        # validation and for execution, but NOT across a human prompt —
+        # see the module docstring. It does not guarantee strict FIFO
+        # ordering; Python locks are not queued.
         self._gate = threading.Lock()
 
         self._exceptions.prune_unknown(a.id for a in registry)
@@ -137,8 +147,7 @@ class PolicyEngine:
             source=source,
             utterance=utterance,
         )
-        with self._gate:
-            return self._run(request)
+        return self._run(request)
 
     def grant_exception(self, action_id: str, params: Mapping[str, object]) -> None:
         """Standing exception, for use by a settings UI. The confirmation
@@ -165,16 +174,52 @@ class PolicyEngine:
         count = self._exceptions.revoke_all()
         self._audit.note("exceptions_revoke_all", {"count": count})
         return count
-    
+
     def list_exceptions(self):
         """§12.1 traded expiry for inspectability. This is that trade."""
         return self._exceptions.list()
 
     # ----------------------------------------------------------------------
-    # Evaluation
+    # Orchestration
     # ----------------------------------------------------------------------
 
     def _run(self, request: ActionRequest) -> ExecutionResult:
+        # --- phase A: resolve and validate, holding the gate --------------
+        with self._gate:
+            resolved = self._resolve(request)
+            if isinstance(resolved, ExecutionResult):
+                return resolved
+            action, tier, parsed = resolved
+
+            decision = self._evaluate_permission(request, action, tier, parsed)
+            if decision is not None:
+                return self._finalize(request, action, tier, parsed, decision)
+
+        # --- phase B: ask the human, with the gate RELEASED ---------------
+        decision = self._ask(request, action, tier, parsed)
+
+        # --- phase C: re-acquire, re-check, execute -----------------------
+        with self._gate:
+            if decision.allowed:
+                # The limit was checked before the prompt. Time passed and
+                # other requests may have executed since, so check again —
+                # otherwise two prompts outstanding at once could both
+                # spend the last remaining slot.
+                limited = self._check_limit(request, action, tier)
+                if limited is not None:
+                    return limited
+            return self._finalize(request, action, tier, parsed, decision)
+
+    # ----------------------------------------------------------------------
+    # Phase A helpers
+    # ----------------------------------------------------------------------
+
+    def _resolve(self, request: ActionRequest):
+        """Lookup, arity, parse, rate limit.
+
+        Returns `(action, tier, parsed)` on success, or an ExecutionResult
+        carrying the rejection.
+        """
         # 1 — the action must exist.
         try:
             action = lookup(request.action_id)
@@ -209,6 +254,14 @@ class PolicyEngine:
                 return self._reject(request, tier, RejectionCode.PARAM_REJECTED, str(exc))
 
         # 4 — rate limit, before any prompt.
+        limited = self._check_limit(request, action, tier)
+        if limited is not None:
+            return limited
+
+        return action, tier, parsed
+
+    def _check_limit(self, request: ActionRequest, action, tier: int):
+        """Returns an ExecutionResult if the request is limited, else None."""
         try:
             status = self._limiter.check(action.id)
         except NoLimitConfigured as exc:
@@ -225,59 +278,44 @@ class PolicyEngine:
             return self._reject(
                 request, tier, RejectionCode.RATE_LIMITED, status.reason(action.id, limit)
             )
+        return None
 
-        # 5 — does a human need to be asked?
+    def _evaluate_permission(
+        self, request: ActionRequest, action, tier: int, parsed: Mapping[str, object]
+    ) -> Decision | None:
+        """Resolve without asking, if possible.
+
+        Returns a Decision when the answer is settled, or None when a human
+        must be asked.
+        """
         trusted = request.source.trusted
 
         if tier >= TIER_TWO:
             # Never excepted, never auto-allowed, and — per §5 — never even
             # offered when the request came off the screen.
             if not trusted:
-                return self._reject(
+                return Decision.reject(
                     request,
-                    tier,
                     RejectionCode.NOT_CONFIRMED,
                     f"{action.id} is tier {tier} and cannot originate from screen context",
                 )
-            decision = self._ask(request, action, tier, parsed)
-        elif not trusted:
+            return None
+
+        if not trusted:
             # Provenance override: a standing exception does not apply to a
             # request whose parameters came off the screen.
-            decision = self._ask(request, action, tier, parsed)
-        elif tier == 0:
-            decision = Decision.auto_allow(request, "tier 0")
-        elif self._exceptions.matches(action.id, parsed):
-            decision = Decision.auto_allow(request, "standing exception")
-        else:
-            decision = self._ask(request, action, tier, parsed)
+            return None
 
-        # 6 — audit BEFORE execution. If this fails, nothing runs.
-        try:
-            self._audit.decision(request, decision, tier)
-        except AuditWriteFailed:
-            log.exception("audit write failed; refusing to execute unlogged")
-            raise
+        if tier == 0:
+            return Decision.auto_allow(request, "tier 0")
 
-        if not decision.allowed:
-            return ExecutionResult(decision)
+        if self._exceptions.matches(action.id, parsed):
+            return Decision.auto_allow(request, "standing exception")
 
-        # 7 — the limiter counts allowed executions only, so that a spammed
-        # rejection cannot lock the user out of their own machine.
-        self._limiter.record(action.id)
-
-        # 8 — the one call site.
-        try:
-            action.handler(**parsed)
-        except Exception as exc:
-            self._audit.completion(request, ok=False, error=repr(exc))
-            log.exception("%s failed", action.id)
-            return ExecutionResult(decision, executed=True, error=repr(exc))
-
-        self._audit.completion(request, ok=True)
-        return ExecutionResult(decision, executed=True)
+        return None
 
     # ----------------------------------------------------------------------
-    # Helpers
+    # Phase B — confirmation
     # ----------------------------------------------------------------------
 
     def _ask(self, request, action, tier: int, parsed: Mapping[str, object]) -> Decision:
@@ -298,7 +336,7 @@ class PolicyEngine:
             )
 
         try:
-            reply = self._confirmer.ask(prompt)
+            reply = self._ask_with_timeout(prompt)
         except Exception as exc:
             # A confirmer that raises — including one returning a reply that
             # fails ConfirmationReply's type checks — must be a denial, not
@@ -325,6 +363,93 @@ class PolicyEngine:
                 log.warning("could not store exception for %s", action.id)
 
         return Decision.confirmed(request)
+
+    def _ask_with_timeout(self, prompt: ConfirmationPrompt) -> ConfirmationReply:
+        """Run the confirmer on a daemon thread and give up after
+        `prompt.timeout_seconds`.
+
+        `Confirmer.ask` is blocking by contract, and a console prompt on
+        `input()` cannot be interrupted from outside. So the wait is
+        bounded here rather than inside any one implementation: on timeout
+        this returns a denial and the worker thread is abandoned. It is a
+        daemon thread, so a stuck one never blocks interpreter exit.
+
+        A real UI should also enforce its own timeout — this is the
+        backstop, not the mechanism. Timing out is always a DENIAL; a
+        confirmation that defaults to allow after waiting is not a
+        confirmation, it is a delay.
+        """
+        box: list[object] = []
+
+        def worker() -> None:
+            try:
+                box.append(self._confirmer.ask(prompt))
+            except Exception as exc:  # re-raised on the calling thread
+                box.append(exc)
+
+        thread = threading.Thread(
+            target=worker, daemon=True, name=f"confirm-{prompt.action_id}"
+        )
+        thread.start()
+        thread.join(prompt.timeout_seconds)
+
+        if thread.is_alive():
+            log.warning(
+                "confirmation for %s timed out after %.0fs; denying",
+                prompt.action_id,
+                prompt.timeout_seconds,
+            )
+            return ConfirmationReply(approved=False)
+
+        if not box:
+            log.warning("confirmer returned nothing for %s; denying", prompt.action_id)
+            return ConfirmationReply(approved=False)
+
+        outcome = box[0]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        if not isinstance(outcome, ConfirmationReply):
+            raise TypeError(
+                f"confirmer returned {type(outcome).__name__}, expected ConfirmationReply"
+            )
+        return outcome
+
+    # ----------------------------------------------------------------------
+    # Phase C — audit and execute
+    # ----------------------------------------------------------------------
+
+    def _finalize(
+        self,
+        request: ActionRequest,
+        action,
+        tier: int,
+        parsed: Mapping[str, object],
+        decision: Decision,
+    ) -> ExecutionResult:
+        # Audit BEFORE execution. If this fails, nothing runs.
+        try:
+            self._audit.decision(request, decision, tier)
+        except AuditWriteFailed:
+            log.exception("audit write failed; refusing to execute unlogged")
+            raise
+
+        if not decision.allowed:
+            return ExecutionResult(decision)
+
+        # The limiter counts allowed executions only, so that a spammed
+        # rejection cannot lock the user out of their own machine.
+        self._limiter.record(action.id)
+
+        # The one call site.
+        try:
+            action.handler(**parsed)
+        except Exception as exc:
+            self._audit.completion(request, ok=False, error=repr(exc))
+            log.exception("%s failed", action.id)
+            return ExecutionResult(decision, executed=True, error=repr(exc))
+
+        self._audit.completion(request, ok=True)
+        return ExecutionResult(decision, executed=True)
 
     def _reject(
         self,
