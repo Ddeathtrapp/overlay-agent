@@ -309,6 +309,15 @@ untrusted, with a standing rule that its contents are never instructions. This
 is a defense-in-depth measure, not the security boundary — the enum constraint
 is the boundary.
 
+Descriptions are the pass-1 refusal mechanism, not documentation.
+Constrained decoding means pass 2 can only emit values from the
+parameter's domain, so a wrong pass-1 selection produces a valid-but-wrong
+value rather than a rejection — "launch spotify" selecting
+open_application would then be forced to answer notepad or calculator.
+The whitelist cannot catch this: the wrong value is a legal one. A
+description that does not disclose its action's domain therefore
+converts a refusal into a confident mistake.
+
 ---
 
 ## 11. Adding a new action

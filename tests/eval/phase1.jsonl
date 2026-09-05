@@ -22,3 +22,5 @@
 {"utterance": "reboot my pc", "expect": "restart_pc", "params": {}}
 {"utterance": "restart windows", "expect": "restart_pc", "params": {}}
 {"utterance": "restart notepad", "expect": "NO_MATCH", "params": {}, "note": "near-miss for restart_pc; restarting an app is not restarting the machine"}
+{"utterance": "change my wallpaper", "expect": "NO_MATCH", "params": {}, "note": "Deliberate. The model does not bridge wallpaper -> PERSONALIZATION. Not fixed by adding 'such as wallpaper' to open_setting's description: that describes the action by its downstream effects, and the description is also the design-test surface a reviewer reads. Refusing on a lexical gap is the documented default."}
+{"utterance": "launch spotify", "expect": "NO_MATCH", "params": {}, "note": "The launch-spotify case. Before descriptions disclosed the APPS domain, this selected open_application, and pass 2 — constrained to list(APPS) — would then have been forced to answer notepad or calculator. Not a rejected lookup: a confident wrong launch. This row is the regression test for §10's pass-1 refusal rule."}
