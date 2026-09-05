@@ -311,7 +311,6 @@ def test_exceptions_revoke_all_audits_each_grant_before_the_summary(
     # order, on disk.
     assert max(revoked_indexes) < summary_indexes[0]
 
-    intact, _ = AuditLog(audit_path).verify_chain()
-    assert intact
+    assert AuditLog(audit_path).verify_chain()
 
     assert store.list() == []

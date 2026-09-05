@@ -13,7 +13,8 @@ import json
 
 from _helpers import StubConfirmer, build_engine
 
-from policy.audit import _params_for_log, _safe_action_id, _safe_reason, _safe_utterance
+import policy.audit as audit_module
+from policy.audit import AuditLog, _params_for_log, _safe_action_id, _safe_reason, _safe_utterance
 from policy.confirm import ConfirmationReply
 from policy.types import ActionRequest, Decision, Outcome, RejectionCode, Source
 
@@ -303,5 +304,141 @@ def test_chain_intact_after_redacted_records(tmp_path) -> None:
     engine.execute(UNKNOWN_ACTION_CANARY, {}, source=Source.SCREEN_CONTEXT)
     engine.execute(UNKNOWN_ACTION_CANARY, {}, source=Source.DESKTOP)
 
-    intact, _ = audit.verify_chain()
-    assert intact
+    assert audit.verify_chain()
+
+
+# --- verify_chain(): ChainStatus shape, rotation, tamper detection ---------
+
+
+def test_verify_chain_missing_log_reports_not_intact(tmp_path) -> None:
+    """Regression test for the old behaviour: `verify_chain()` used to walk
+    only `self._path` and treated a file that did not exist as an empty,
+    trivially-intact chain -- so deleting the audit log entirely PASSED the
+    integrity check, which is exactly the tamper case this control exists
+    to catch. A missing log must now report NOT intact.
+    """
+    audit = AuditLog(tmp_path / "audit.jsonl")  # never written to
+    status = audit.verify_chain()
+
+    assert status.intact is False
+    assert bool(status) is False
+    assert status.file is None
+    assert status.first_break_line == 0
+    assert status.reason == "audit log is absent; nothing to verify"
+
+
+def test_verify_chain_spans_rotation_and_stays_clean(tmp_path, monkeypatch) -> None:
+    """The chain continues across a rotation: the new file's first record
+    still points at the old file's last record's hash. Force a tiny
+    MAX_BYTES so a modest run of note() calls rotates at least once, then
+    verify the whole thing reads as one intact, genesis-anchored chain.
+    """
+    # Enough notes to rotate a few times but stay under KEEP_ROTATIONS, so
+    # the record anchored at GENESIS is not itself purged by retention
+    # (verified empirically: at MAX_BYTES=200 rotation happens roughly
+    # every 2 notes; 10 notes stays well inside the 5-rotation retention
+    # window, unlike e.g. 60 which purges the genesis-anchored file and
+    # would make this a test of a *different* code path).
+    monkeypatch.setattr(audit_module, "MAX_BYTES", 200)
+    audit = AuditLog(tmp_path / "audit.jsonl")
+    for i in range(10):
+        audit.note("rotation-test", {"i": i})
+
+    files = audit._chain_files()
+    assert len(files) > 1, "test setup failed to force a rotation"
+    # Rotated file(s) first (oldest first), current log last.
+    assert files[-1] == audit._path
+    assert all(f != audit._path for f in files[:-1])
+
+    status = audit.verify_chain()
+    assert status.intact is True
+    assert status.anchored_at_genesis is True
+    assert status.reason == "ok"
+
+
+def test_verify_chain_deleted_middle_line_reports_file_and_line(tmp_path) -> None:
+    """Removing a line from the middle of the file breaks the `prev` link
+    for the record that follows it. Deleting the record that WAS 1-based
+    line k means that record's successor becomes the new line k -- its
+    `prev` field (unchanged) no longer matches the hash the walk is
+    carrying, so the break is reported at line k in the post-deletion file,
+    not at the original position of the deleted line.
+    """
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path)
+    for i in range(6):
+        audit.note("delete-test", {"i": i})
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 6
+
+    deleted_index = 2  # 0-based; not the first line (see module note above)
+    deleted_line_number = deleted_index + 1  # 1-based position removed
+    del lines[deleted_index]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    status = audit.verify_chain()
+
+    assert status.intact is False
+    assert status.reason == "prev hash mismatch"
+    assert status.file == path.name
+    assert status.first_break_line == deleted_line_number
+
+
+def test_verify_chain_edited_record_reports_hash_mismatch(tmp_path) -> None:
+    """Changing a payload field in place -- same line count, `prev`
+    untouched -- leaves the `prev` link consistent but makes the record's
+    own stored `hash` stale, so the walk must catch it as a hash mismatch,
+    not a prev mismatch.
+    """
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path)
+    for i in range(5):
+        audit.note("edit-test", {"i": i})
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    edit_index = 2  # 0-based
+    edit_line_number = edit_index + 1
+    record = json.loads(lines[edit_index])
+    assert "prev" in record and "hash" in record
+    record["i"] = "CANARY-EDITED-PAYLOAD"  # payload field only; prev untouched
+    lines[edit_index] = json.dumps(record)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    status = audit.verify_chain()
+
+    assert status.intact is False
+    assert status.reason == "record hash mismatch"
+    assert status.file == path.name
+    assert status.first_break_line == edit_line_number
+
+
+def test_verify_chain_not_anchored_when_oldest_retained_lacks_genesis(
+    tmp_path, monkeypatch
+) -> None:
+    """Force exactly one rotation, then delete the rotated-away file so only
+    the current file survives and its first record's `prev` is not
+    GENESIS. What remains is internally consistent (`intact is True`) but
+    cannot be traced back to the start of the chain
+    (`anchored_at_genesis is False`) -- that combination is the interesting
+    state and must be distinguishable from an actual break.
+    """
+    monkeypatch.setattr(audit_module, "MAX_BYTES", 200)
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path)
+    rotated = path.with_suffix(".jsonl.1")
+
+    for i in range(200):  # generous upper bound; stop at the first rotation
+        audit.note("anchor-test", {"i": i})
+        if rotated.exists():
+            break
+    assert rotated.exists(), "test setup failed to force a rotation"
+    assert len(audit._chain_files()) == 2, "expected exactly one rotation here"
+
+    rotated.unlink()
+
+    status = audit.verify_chain()
+
+    assert status.intact is True
+    assert status.anchored_at_genesis is False
+    assert "rotated away" in status.reason
