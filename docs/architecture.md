@@ -127,7 +127,7 @@ of tier or standing exception.
 |---|---|---|
 | Language | Python 3.14 | Win32 access via `ctypes`, fast iteration |
 | Inference | Ollama, local | Screen contents never leave the machine |
-| Model | `qwen2.5-coder:7b` Q4_K_M, ctx 8192 | Classification is easy; this is more than sufficient |
+| Model | `qwen2.5-coder:7b` Q4_K_M, ctx 4096 | Classification is easy; this is more than sufficient |
 | GPU backend | Vulkan | RX 6600 XT (`gfx1032`) is not on Ollama's Windows ROCm list |
 | Constrained decoding | GBNF grammar | Makes invalid output impossible, not just unlikely |
 | Transport | WebSocket over Tailscale | No port forwarding, no public exposure |
@@ -136,8 +136,35 @@ of tier or standing exception.
 | Tests | pytest | — |
 
 **Hardware:** Ryzen 7 5800X3D, RX 6600 XT (8GB), 16GB RAM (~7GB free).
-The 8GB VRAM ceiling shaped the original design; with classification-only
-inference it is no longer a binding constraint.
+
+Phase 0 validated 2026-09-05: Vulkan backend, `qwen2.5-coder:7b-instruct-q4_K_M`
+resident at 100% GPU, 4.7GB, 4096 context, ~51 tok/s generation. The 8GB VRAM
+ceiling shaped the original design; with classification-only inference it is
+not a binding constraint. System RAM is — see below.
+
+### 5.1 RAM is the binding constraint, not VRAM
+
+Model weights live entirely in VRAM; system RAM plays no part in inference.
+The ~7GB of free RAM is what limits everything else: the Ollama host process,
+the Python daemon, the OCR pipeline, and the overlay all compete for it, and
+Phases 5–7 add all four at once.
+
+**Consequences for open decisions:**
+- The Electron vs PySide6 choice for the overlay (§3.6) was made on the 7GB
+  figure. Electron costs 250–400MB against PySide6's ~80MB. If RAM is
+  upgraded to 32GB, that constraint disappears and the decision should be
+  re-made on UI quality rather than footprint.
+- OCR runs in a separate process rather than a thread (GIL contention would
+  stutter the overlay animation). That costs another 300–600MB and is not
+  negotiable on correctness grounds.
+
+**What more RAM does NOT unlock:** a larger model. `qwen3-coder:30b` needs
+~19GB of VRAM; CPU offload at 8GB VRAM would drop generation from ~51 tok/s
+to single digits. The model ceiling is the GPU and is unaffected by RAM.
+
+Revisit this section on any hardware change. The RAM figure is load-bearing
+for §3.6 and nothing else in this document flags that dependency.
+
 
 ---
 
@@ -175,12 +202,13 @@ the model is bolted on late, and the untrusted input path is last.
 **Phase 4 is a real stopping point.** It is a complete, useful product. Do not
 treat phases 5–7 as obligatory.
 
----
-
-Confirmation UI constraints (recorded in Phase 1, from the T7 composition
+**Confirmation UI constraints** (recorded in Phase 1, from the T7 composition
 finding): must not be a toast; must be shown on all virtual desktops or
 pinned; must never default to allow on timeout; `open_new_desktop` is blocked
 while a confirmation is pending.
+
+
+---
 
 
 ## 8. What this is not
