@@ -150,6 +150,21 @@ def _chain_hash(prev_hash: str, body: Mapping[str, object]) -> str:
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class ChainStatus:
+    """Result of walking the hash chain."""
+
+    intact: bool
+    first_break_line: int = 0
+    file: str | None = None
+    anchored_at_genesis: bool = True
+    reason: str = "ok"
+
+    def __bool__(self) -> bool:
+        return self.intact
+
+
+
 class AuditLog:
     """Append-only JSONL. One line per event, never rewritten.
 
@@ -213,31 +228,77 @@ class AuditLog:
 
     # -- reads -------------------------------------------------------------
 
-    def verify_chain(self) -> tuple[bool, int]:
-        """Walk the chain. Returns (intact, line_number_of_first_break).
+    def _chain_files(self) -> list[Path]:
+        """Rotated files oldest-first, then the current log.
+
+        The chain continues across rotations — the first record of a new
+        file points at the last record of the previous one — so verifying
+        only the current file reports a false break on line 1 after every
+        rotation.
+        """
+        files: list[Path] = []
+        for i in range(KEEP_ROTATIONS, 0, -1):
+            candidate = self._path.with_suffix(f".jsonl.{i}")
+            if candidate.exists():
+                files.append(candidate)
+        if self._path.exists():
+            files.append(self._path)
+        return files
+
+    def verify_chain(self) -> ChainStatus:
+        """Walk every retained file in order.
 
         A break means a line was deleted or edited. It does not identify
         who did it, and a determined editor can recompute the chain.
+
+        A MISSING log reports as NOT intact. The old behaviour — returning
+        "intact" for a file that does not exist — meant deleting the log
+        entirely passed the integrity check, which is the one tamper case
+        this control exists to catch.
         """
-        prev = GENESIS
-        try:
-            with self._path.open("r", encoding="utf-8") as fh:
-                for n, line in enumerate(fh, start=1):
-                    line = line.strip()
-                    if not line:
-                        continue
-                    body = json.loads(line)
-                    if body.get("prev") != prev:
-                        return False, n
-                    if body.get("hash") != _chain_hash(body["prev"], body):
-                        return False, n
-                    prev = body["hash"]
-        except FileNotFoundError:
-            return True, 0
-        except Exception:
-            log.exception("audit chain unreadable")
-            return False, 0
-        return True, 0
+        files = self._chain_files()
+        if not files:
+            return ChainStatus(
+                intact=False, reason="audit log is absent; nothing to verify"
+            )
+
+        prev: str | None = None
+        anchored = True
+
+        for path in files:
+            try:
+                with path.open("r", encoding="utf-8") as fh:
+                    for n, line in enumerate(fh, start=1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        body = json.loads(line)
+                        if prev is None:
+                            # Oldest retained record. If it is not genesis,
+                            # earlier files have rolled off and anything
+                            # before this point is unverifiable.
+                            prev = body.get("prev", GENESIS)
+                            anchored = prev == GENESIS
+                        if body.get("prev") != prev:
+                            return ChainStatus(
+                                False, n, path.name, anchored, "prev hash mismatch"
+                            )
+                        if body.get("hash") != _chain_hash(body["prev"], body):
+                            return ChainStatus(
+                                False, n, path.name, anchored, "record hash mismatch"
+                            )
+                        prev = body["hash"]
+            except Exception as exc:
+                log.exception("audit chain unreadable at %s", path)
+                return ChainStatus(False, 0, path.name, anchored, f"unreadable: {exc!r}")
+
+        return ChainStatus(
+            intact=True,
+            anchored_at_genesis=anchored,
+            reason="ok"
+            if anchored
+            else "intact from oldest retained record; earlier files rotated away",
+        )
 
     # -- internals ---------------------------------------------------------
 

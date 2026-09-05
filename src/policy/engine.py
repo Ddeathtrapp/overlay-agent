@@ -391,7 +391,14 @@ class PolicyEngine:
             target=worker, daemon=True, name=f"confirm-{prompt.action_id}"
         )
         thread.start()
-        thread.join(prompt.timeout_seconds)
+        try:
+            thread.join(prompt.timeout_seconds)
+        except KeyboardInterrupt:
+            # Ctrl+C reaches the MAIN thread, which is here in join(), not
+            # the worker blocked on input(). Treat it as a denial — the
+            # user interrupting a confirmation prompt means no.
+            log.info("confirmation for %s interrupted; denying", prompt.action_id)
+            return ConfirmationReply(approved=False)
 
         if thread.is_alive():
             log.warning(

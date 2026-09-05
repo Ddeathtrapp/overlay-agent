@@ -149,6 +149,13 @@ in-scope at Phase 5 when the service auto-restarts on crash — a crash loop
 would then reset limits without code execution. Fix at Phase 5: persist a
 wall-clock `blocked_until` for tier 2 only, keeping monotonic for the
 sliding window. Clock rollback then over-blocks rather than under-blocks.
+Separately, rate limits do not bind through the CLI at all: `_runtime()`
+constructs a fresh RateLimiter per process and the CLI dispatches one
+action per process, so the window is always empty. §12.2's hard tier 2
+cap is currently enforced only by the typed confirmation. This resolves
+itself at Phase 5 when the engine becomes long-lived inside a daemon —
+it is a deployment consequence, not a defect in limits.py, and is
+tracked as a Phase 5 dependency rather than worked around now.
 
 ### T9 — Screen contents leaving the machine
 **Vector:** design choice, not an attacker.
