@@ -126,10 +126,10 @@ of tier or standing exception.
 | Layer | Choice | Why |
 |---|---|---|
 | Language | Python 3.14 | Win32 access via `ctypes`, fast iteration |
-| Inference | Ollama, local | Screen contents never leave the machine |
+| Inference | Ollama, local (loopback enforced) | Screen contents never leave the machine. `ollama.py` refuses any non-loopback host — T9's "inference is local" is enforced, not just documented. `keep_alive` is set per request rather than by environment variable: a machine-wide `OLLAMA_KEEP_ALIVE` can be dropped by a reinstall or tray relaunch and the loss is silent (~13s cold vs ~107ms warm) |
 | Model | `qwen2.5-coder:7b` Q4_K_M, ctx 4096 | Classification is easy; this is more than sufficient |
 | GPU backend | Vulkan | RX 6600 XT (`gfx1032`) is not on Ollama's Windows ROCm list |
-| Constrained decoding | GBNF grammar | Makes invalid output impossible, not just unlikely |
+| Constrained decoding | JSON Schema via Ollama `format` | Compiled to a grammar by XGrammar; Ollama does not expose raw GBNF. The engine re-validates against the registry regardless |
 | Transport | WebSocket over Tailscale | No port forwarding, no public exposure |
 | Phone UI | PWA | No app store, no native build |
 | Overlay | See Phase 7 decision | Electron vs. PySide6 — RAM budget dependent |

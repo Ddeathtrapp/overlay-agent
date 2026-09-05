@@ -1,0 +1,1 @@
+"""Policy engine — the security boundary. Human-owned; no agent writes here."""
