@@ -99,6 +99,11 @@ Desktop status display. Glowing perimeter reflecting state
 carries `WDA_EXCLUDEFROMCAPTURE` so it never appears in its own screen
 captures. **Display only** — it is not an input surface and cannot dispatch.
 
+### 3.7 Interactive UI (`src/ui/`) — Phase 4
+Confirmation dialog and the hotkey input box. Separate from the overlay
+because §3.6 is display-only and cannot dispatch; anything the user types
+into or clicks lives here.
+
 ---
 
 ## 4. Trust boundaries
@@ -179,6 +184,7 @@ for §3.6 and nothing else in this document flags that dependency.
 | `src/transport/` | `transport-engineer` | Human review of auth code |
 | `src/context/` | `classifier-engineer` | Phase 6 |
 | `src/overlay/` | `overlay-engineer` | — |
+| `src/ui/` | `overlay-engineer` | Phase 4. Confirmation dialog implements policy/confirm.py Confirmer |
 | `tests/` | `test-runner`, all | — |
 | `docs/` | **Human only** | Specs are amended by humans, not agents |
 
@@ -204,9 +210,9 @@ treat phases 5–7 as obligatory.
 
 **Confirmation UI constraints** (recorded in Phase 1, from the T7 composition
 finding): must not be a toast; must be shown on all virtual desktops or
-pinned; must never default to allow on timeout; `open_new_desktop` is blocked
-while a confirmation is pending.
-
+pinned; must never default to allow on timeout; `open_new_desktop` is blocked while a confirmation is pending. Implemented in engine.py as a blanket block on ALL actions while a prompt is open,
+because Windows offers no supported way to pin a dialog across virtual
+desktops — the block is the mitigation, not a supplement to one.
 
 ---
 

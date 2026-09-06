@@ -116,6 +116,20 @@ class PolicyEngine:
         # see the module docstring. It does not guarantee strict FIFO
         # ordering; Python locks are not queued.
         self._gate = threading.Lock()
+                # architecture.md §7: no action may run while a confirmation is
+        # awaiting an answer. The Phase 2 deadlock fix released the gate
+        # during the prompt, which made `open_new_desktop` — tier 0, so
+        # auto-allowed — able to switch the user to a different virtual
+        # desktop and away from a dialog they had not answered. That is
+        # the T7 composition finding becoming reachable.
+        #
+        # Windows offers no supported way to pin a window across virtual
+        # desktops (§9 rules out IVirtualDesktopManager for the same
+        # reason), so this block IS the mitigation, not a supplement to
+        # one. Blocking everything rather than a curated "disruptive"
+        # list is deliberate: a list requires someone to correctly
+        # classify every future action, and getting that wrong is silent.
+        self._pending_confirmation = False
 
         self._exceptions.prune_unknown(a.id for a in registry)
 
@@ -191,12 +205,36 @@ class PolicyEngine:
                 return resolved
             action, tier, parsed = resolved
 
+            # Checked before the permission decision, so it applies to
+            # auto-allowed tier 0 actions too — those are the ones that
+            # run without a prompt of their own and can therefore move
+            # the user away from one that is open.
+            if self._pending_confirmation:
+                return self._reject(
+                    request,
+                    tier,
+                    RejectionCode.CONFIRMATION_PENDING,
+                    "a confirmation is already awaiting an answer",
+                )
+
             decision = self._evaluate_permission(request, action, tier, parsed)
             if decision is not None:
                 return self._finalize(request, action, tier, parsed, decision)
 
+            # Marked before the gate is released, so a request arriving
+            # during phase B sees it.
+            self._pending_confirmation = True
+
         # --- phase B: ask the human, with the gate RELEASED ---------------
-        decision = self._ask(request, action, tier, parsed)
+        try:
+            decision = self._ask(request, action, tier, parsed)
+        finally:
+            # Cleared on every path, including a raising confirmer and a
+            # timeout. A stuck flag would reject every subsequent action
+            # for the life of the process — the deadlock this phase
+            # structure exists to prevent, reintroduced by a missing
+            # finally.
+            self._pending_confirmation = False
 
         # --- phase C: re-acquire, re-check, execute -----------------------
         with self._gate:
