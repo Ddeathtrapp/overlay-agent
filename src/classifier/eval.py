@@ -56,6 +56,11 @@ from .schema import NO_MATCH
 _TARGET_ACTION_ROWS = 100
 _TARGET_NO_MATCH_ROWS = 30
 
+# Fixed, innocuous, and NOT one of the eval rows: used only to pay the
+# one-time model-load cost before timing starts. Its result is discarded
+# unconditionally — never scored, never counted, never printed as a row.
+_WARMUP_UTTERANCE = "what's the weather like today"
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_DATA = _REPO_ROOT / "tests" / "eval" / "phase1.jsonl"
 
@@ -172,6 +177,35 @@ def _fmt_params(params: dict) -> str:
     return "{" + ", ".join(f"{k}={v!r}" for k, v in sorted(params.items())) + "}"
 
 
+def _honesty_line(action_rows: int, no_match_rows: int) -> str:
+    """Derive the honesty message from the actual counts, every time.
+
+    A hardcoded verdict goes stale the moment the data file changes size
+    in either direction -- the same defect class as a hardcoded whitelist
+    in a description (§10). This computes the shortfall (or its absence)
+    fresh on each run so the printed sentence can never assert the
+    opposite of what the row counts two lines above just reported.
+    """
+    action_short = max(0, _TARGET_ACTION_ROWS - action_rows)
+    no_match_short = max(0, _TARGET_NO_MATCH_ROWS - no_match_rows)
+    target = f"{_TARGET_ACTION_ROWS} action rows + {_TARGET_NO_MATCH_ROWS} NO_MATCH rows"
+    if action_short or no_match_short:
+        shortfall = f"{action_short} action row(s) and {no_match_short} NO_MATCH row(s)"
+        return (
+            f"action-registry.md S10 calls for {target}. This run has "
+            f"{action_rows} + {no_match_rows}, short by {shortfall}. These "
+            "numbers are indicative only and do NOT satisfy the S10 "
+            "eval-set gate."
+        )
+    return (
+        f"action-registry.md S10 calls for {target}. This run has "
+        f"{action_rows} + {no_match_rows}, meeting or exceeding the "
+        "target row counts -- the S10 eval-set size gate is met. This is "
+        "a statement about row counts only: it says nothing about whether "
+        "the rates reported below are good."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
@@ -207,13 +241,7 @@ def report(outcomes: list[Outcome], data_path: Path) -> int:
         f"({len(action_target_rows)} expect an action, "
         f"{len(no_match_target_rows)} expect NO_MATCH)"
     )
-    print(
-        "HONESTY: action-registry.md S10 calls for "
-        f"{_TARGET_ACTION_ROWS} action rows + {_TARGET_NO_MATCH_ROWS} "
-        f"NO_MATCH rows. This run has {len(action_target_rows)} + "
-        f"{len(no_match_target_rows)}. These numbers are indicative only "
-        "and do NOT satisfy the S10 eval-set gate."
-    )
+    print(f"HONESTY: {_honesty_line(len(action_target_rows), len(no_match_target_rows))}")
     print()
 
     # -- exclude CLASSIFIER_UNAVAILABLE / REGISTRY_ERROR from all scoring --
@@ -408,8 +436,7 @@ def report(outcomes: list[Outcome], data_path: Path) -> int:
     print(f"  parameter accuracy: {param_hits}/{p_d}" if p_d else "  parameter accuracy: n/a")
     print(f"  PARAM_UNDETERMINED: {len(undetermined)}")
     print(
-        "  NOTE: this eval set is far smaller than S10's 100+30 target -- "
-        "see the HONESTY line above. These numbers do not meet the S10 gate."
+        f"  NOTE: {_honesty_line(len(action_target_rows), len(no_match_target_rows))}"
     )
 
     return 1 if excluded else 0
@@ -452,6 +479,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not rows:
         print(f"No rows found in {args.data}")
         return 1
+
+    # Warm-up: pays the one-time model-load cost (observed ~11.7s cold vs.
+    # ~365ms steady-state) before timing starts, so the reported latencies
+    # are steady-state rather than dragged up by a cold-load outlier. Fixed
+    # utterance, not an eval row; result is discarded unconditionally --
+    # not scored, not counted, not printed as a row.
+    print(f"Warm-up call ({_WARMUP_UTTERANCE!r}) -- discarding result, not scored...")
+    classifier.classify(_WARMUP_UTTERANCE)
+    print("Warm-up complete. Timed run starting now.")
 
     outcomes = run(rows, classifier)
     return report(outcomes, args.data)

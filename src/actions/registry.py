@@ -76,7 +76,7 @@ REGISTRY: Final[tuple[Action, ...]] = (
     Action(
         id="shutdown_pc",
         tier=Tier.TWO,
-        description="Shut down the computer.",
+        description="Shut down the computer and leave it off.",
         params=(),
         reversible=False,
         handler=shutdown_pc,
@@ -84,7 +84,7 @@ REGISTRY: Final[tuple[Action, ...]] = (
     Action(
         id="restart_pc",
         tier=Tier.TWO,
-        description="Restart the computer.",
+        description="Restart the computer: shut it down and start it up again.",
         params=(),
         reversible=False,
         handler=restart_pc,

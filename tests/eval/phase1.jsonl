@@ -23,3 +23,108 @@
 {"utterance": "restart notepad", "expect": "NO_MATCH", "params": {}, "note": "near-miss for restart_pc; restarting an app is not restarting the machine"}
 {"utterance": "change my wallpaper", "expect": "NO_MATCH", "params": {}, "note": "Deliberate. The model does not bridge wallpaper -> PERSONALIZATION. Not fixed by adding 'such as wallpaper' to open_setting's description: that describes the action by its downstream effects, and the description is also the design-test surface a reviewer reads. Refusing on a lexical gap is the documented default."}
 {"utterance": "launch spotify", "expect": "NO_MATCH", "params": {}, "note": "The launch-spotify case. Before descriptions disclosed the APPS domain, this selected open_application, and pass 2 — constrained to list(APPS) — would then have been forced to answer notepad or calculator. Not a rejected lookup: a confident wrong launch. This row is the regression test for §10's pass-1 refusal rule."}
+{"utterance": "could you turn on dark mode for me please", "expect": "toggle_dark_mode", "params": {}, "note": "polite phrasing"}
+{"utterance": "enable dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "verb synonym: enable"}
+{"utterance": "activate the dark theme", "expect": "toggle_dark_mode", "params": {}, "note": "verb synonym (activate) + noun synonym (theme)"}
+{"utterance": "um, can you maybe turn on dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "filler and hesitation"}
+{"utterance": "swithc to dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "misspelling of 'switch'"}
+{"utterance": "turn dark mode off", "expect": "toggle_dark_mode", "params": {}, "note": "toggle-off direction; action has no direction param so this should still match"}
+{"utterance": "disable dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "verb synonym for turning off: disable"}
+{"utterance": "flip to light mode", "expect": "toggle_dark_mode", "params": {}, "note": "paraphrase without the words 'dark' or 'theme' in the target direction"}
+{"utterance": "can you toggle the theme please", "expect": "toggle_dark_mode", "params": {}, "note": "generic 'toggle' + polite, no explicit direction"}
+{"utterance": "hey, turn on the dark theme", "expect": "toggle_dark_mode", "params": {}, "note": "filler + noun synonym 'theme'"}
+{"utterance": "i'd like dark mode turned on", "expect": "toggle_dark_mode", "params": {}, "note": "indirect/polite phrasing, passive voice"}
+{"utterance": "go into dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "casual phrasing, verb 'go into'"}
+{"utterance": "make windows dark", "expect": "toggle_dark_mode", "params": {}, "note": "paraphrase avoiding both 'mode' and 'theme'"}
+{"utterance": "bring up dark mode", "expect": "toggle_dark_mode", "params": {}, "note": "verb synonym 'bring up', unusual pairing worth checking for false negative"}
+{"utterance": "could you make a new virtual desktop please", "expect": "open_new_desktop", "params": {}, "note": "polite phrasing"}
+{"utterance": "start a new desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: start"}
+{"utterance": "launch a new virtual desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: launch"}
+{"utterance": "fire up a new desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: fire up"}
+{"utterance": "pull up a new virtual desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: pull up"}
+{"utterance": "um, can you maybe add a new desktop", "expect": "open_new_desktop", "params": {}, "note": "filler/hesitation + verb synonym 'add'"}
+{"utterance": "creat a new dekstop", "expect": "open_new_desktop", "params": {}, "note": "misspelling of 'create' and 'desktop'"}
+{"utterance": "i need another virtual desktop", "expect": "open_new_desktop", "params": {}, "note": "indirect phrasing, no imperative verb"}
+{"utterance": "spin up a new desktop", "expect": "open_new_desktop", "params": {}, "note": "casual verb synonym: spin up"}
+{"utterance": "add a virtual desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: add"}
+{"utterance": "can you open up a new desktop for me", "expect": "open_new_desktop", "params": {}, "note": "polite + verb phrase 'open up'"}
+{"utterance": "new desktop please", "expect": "open_new_desktop", "params": {}, "note": "terse/minimal phrasing, no verb"}
+{"utterance": "set up a new virtual desktop", "expect": "open_new_desktop", "params": {}, "note": "verb synonym: set up"}
+{"utterance": "opne notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "misspelling of 'open'"}
+{"utterance": "could you open the calcluator", "expect": "open_application", "params": {"app": "calculator"}, "note": "misspelling of 'calculator' + polite phrasing"}
+{"utterance": "could you open notepad for me please", "expect": "open_application", "params": {"app": "notepad"}, "note": "polite phrasing"}
+{"utterance": "bring up notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "verb synonym: bring up"}
+{"utterance": "fire up the calculator", "expect": "open_application", "params": {"app": "calculator"}, "note": "verb synonym: fire up"}
+{"utterance": "pull up notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "verb synonym: pull up"}
+{"utterance": "um, can you maybe open notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "filler/hesitation"}
+{"utterance": "launch calculator app", "expect": "open_application", "params": {"app": "calculator"}, "note": "verb synonym + trailing 'app'"}
+{"utterance": "start the notepad application", "expect": "open_application", "params": {"app": "notepad"}, "note": "verb synonym 'start' + trailing 'application'"}
+{"utterance": "i need to open notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "indirect phrasing"}
+{"utterance": "can you launch the calc", "expect": "open_application", "params": {"app": "calculator"}, "note": "colloquial abbreviation 'calc' instead of 'calculator' -- tests whether the model maps common shorthand to the whitelist key"}
+{"utterance": "open notepad", "expect": "open_application", "params": {"app": "notepad"}, "note": "plain imperative baseline, distinct from existing rows for this action"}
+{"utterance": "get me the calculator", "expect": "open_application", "params": {"app": "calculator"}, "note": "indirect phrasing, no 'open'/'launch' verb"}
+{"utterance": "fire up notepad real quick", "expect": "open_application", "params": {"app": "notepad"}, "note": "casual filler trailing phrase"}
+{"utterance": "hey, open up calculator", "expect": "open_application", "params": {"app": "calculator"}, "note": "filler + verb phrase 'open up'"}
+{"utterance": "open notification settings", "expect": "open_setting", "params": {"page": "NOTIFICATIONS"}, "note": "direct phrasing for an untested SettingPage member (NOTIFICATIONS)"}
+{"utterance": "i want to manage my notifications", "expect": "open_setting", "params": {"page": "NOTIFICATIONS"}, "note": "paraphrase avoiding the word 'settings'; untested page"}
+{"utterance": "show me notification preferences", "expect": "open_setting", "params": {"page": "NOTIFICATIONS"}, "note": "synonym 'preferences' instead of 'settings'; untested page"}
+{"utterance": "open power settings", "expect": "open_setting", "params": {"page": "POWER"}, "note": "direct phrasing for an untested SettingPage member (POWER)"}
+{"utterance": "take me to battery settings", "expect": "open_setting", "params": {"page": "POWER"}, "note": "parameter phrasing avoiding the enum member name ('battery' instead of 'power'), per task guidance"}
+{"utterance": "show me the sleep and power options", "expect": "open_setting", "params": {"page": "POWER"}, "note": "paraphrase referencing the underlying ms-settings:powersleep URI concept"}
+{"utterance": "open personalization settings", "expect": "open_setting", "params": {"page": "PERSONALIZATION"}, "note": "direct phrasing for an untested SettingPage member (PERSONALIZATION)"}
+{"utterance": "i want to change my background", "expect": "open_setting", "params": {"page": "PERSONALIZATION"}, "note": "paraphrase adjacent to the documented 'change my wallpaper' NO_MATCH (line 24 of the original 25); this is a genuine attempt at the same lexical gap with different wording, expected to be at real risk of the same miss -- see report"}
+{"utterance": "open the personalize screen", "expect": "open_setting", "params": {"page": "PERSONALIZATION"}, "note": "verb-form paraphrase 'personalize' instead of 'personalization'"}
+{"utterance": "i want to adjust my screen brightness", "expect": "open_setting", "params": {"page": "DISPLAY"}, "note": "parameter phrasing avoiding the enum member name (screen brightness settings), per task guidance"}
+{"utterance": "open display options", "expect": "open_setting", "params": {"page": "DISPLAY"}, "note": "synonym 'options' instead of 'settings'"}
+{"utterance": "open sound options", "expect": "open_setting", "params": {"page": "SOUND"}, "note": "synonym 'options' instead of 'settings'"}
+{"utterance": "take me to audio settings", "expect": "open_setting", "params": {"page": "SOUND"}, "note": "parameter phrasing avoiding the enum member name ('audio' instead of 'sound'), per task guidance"}
+{"utterance": "open the bluetooth page", "expect": "open_setting", "params": {"page": "BLUETOOTH"}, "note": "parameter phrasing avoiding the enum member name, exact example from task guidance"}
+{"utterance": "bluetooh settings", "expect": "open_setting", "params": {"page": "BLUETOOTH"}, "note": "misspelling of 'bluetooth'"}
+{"utterance": "could you shut down the pc please", "expect": "shutdown_pc", "params": {}, "note": "polite phrasing"}
+{"utterance": "please power down the machine", "expect": "shutdown_pc", "params": {}, "note": "verb synonym: power down + noun synonym 'machine'"}
+{"utterance": "turn off my computer now", "expect": "shutdown_pc", "params": {}, "note": "imperative variant with urgency word 'now'"}
+{"utterance": "shutdown windows", "expect": "shutdown_pc", "params": {}, "note": "terse casual phrasing, 'shutdown' as one word"}
+{"utterance": "um, can you maybe shut the computer down", "expect": "shutdown_pc", "params": {}, "note": "filler/hesitation"}
+{"utterance": "shut the pc down", "expect": "shutdown_pc", "params": {}, "note": "word-order variation (separated phrasal verb)"}
+{"utterance": "kill the power to my computer", "expect": "shutdown_pc", "params": {}, "note": "aggressive colloquial synonym 'kill the power'"}
+{"utterance": "i want to shut down now", "expect": "shutdown_pc", "params": {}, "note": "indirect phrasing, no explicit object"}
+{"utterance": "swithc off the computer", "expect": "shutdown_pc", "params": {}, "note": "misspelling of 'switch'"}
+{"utterance": "power my computer off", "expect": "shutdown_pc", "params": {}, "note": "word-order variation"}
+{"utterance": "shut it down", "expect": "shutdown_pc", "params": {}, "note": "terse phrasing with ambiguous pronoun referent 'it' -- arguable; kept deliberately, flagged in report"}
+{"utterance": "turn off this pc", "expect": "shutdown_pc", "params": {}, "note": "direct imperative variant"}
+{"utterance": "please shut down my computer for me", "expect": "shutdown_pc", "params": {}, "note": "polite, verbose phrasing"}
+{"utterance": "could you restart the pc please", "expect": "restart_pc", "params": {}, "note": "polite phrasing"}
+{"utterance": "please reboot the machine", "expect": "restart_pc", "params": {}, "note": "verb synonym 'reboot' + noun synonym 'machine', polite"}
+{"utterance": "restart my computer now", "expect": "restart_pc", "params": {}, "note": "imperative variant with urgency word 'now'"}
+{"utterance": "um, can you maybe restart the computer", "expect": "restart_pc", "params": {}, "note": "filler/hesitation"}
+{"utterance": "reboot the system", "expect": "restart_pc", "params": {}, "note": "noun synonym 'system' instead of 'computer'"}
+{"utterance": "restrat the pc", "expect": "restart_pc", "params": {}, "note": "misspelling of 'restart'"}
+{"utterance": "power cycle my computer", "expect": "restart_pc", "params": {}, "note": "technical synonym: power cycle"}
+{"utterance": "bounce the computer", "expect": "restart_pc", "params": {}, "note": "colloquial slang synonym 'bounce' for restart -- risky/uncommon phrasing, kept deliberately to probe robustness. Observed actual: NO_MATCH. Arguably CORRECT behaviour, not a classifier defect: 'bounce' is niche sysadmin jargon for restart, and refusing under genuine uncertainty is the documented default (action-registry.md S10; system prompt: 'refusing is always acceptable, guessing is not'). Row and expectation are kept as-is on purpose -- do not 'fix' this by changing expect to NO_MATCH or by widening a description to chase it."}
+{"utterance": "i want to reboot now", "expect": "restart_pc", "params": {}, "note": "indirect phrasing"}
+{"utterance": "restart windows please", "expect": "restart_pc", "params": {}, "note": "polite variant of an existing row"}
+{"utterance": "turn my computer off and back on", "expect": "restart_pc", "params": {}, "note": "paraphrase describing a restart without using the word 'restart' or 'reboot'"}
+{"utterance": "reset the computer", "expect": "restart_pc", "params": {}, "note": "synonym 'reset' -- genuinely ambiguous with a factory-reset reading, no action covers that; kept as arguable, flagged in report"}
+{"utterance": "please restart my pc for me", "expect": "restart_pc", "params": {}, "note": "polite, verbose phrasing"}
+{"utterance": "minimize this window", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no window-management action exists in the registry"}
+{"utterance": "maximize the window", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no window-management action exists in the registry"}
+{"utterance": "close this window", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no window-management action exists in the registry"}
+{"utterance": "mute the volume", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no volume-control action exists in the registry"}
+{"utterance": "log me out", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: log-out is not shutdown_pc or restart_pc and no action covers it"}
+{"utterance": "lock my screen", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no lock-screen action exists in the registry"}
+{"utterance": "sign out of windows", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: sign-out is distinct from shutdown/restart and no action covers it"}
+{"utterance": "empty the recycle bin", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no filesystem-mutation action exists (also excluded by section 8)"}
+{"utterance": "take a screenshot", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no screenshot action exists in the registry"}
+{"utterance": "connect to wifi", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: Network settings page is explicitly excluded by section 9, and no network action exists"}
+{"utterance": "open task manager", "expect": "NO_MATCH", "params": {}, "note": "adjacent-but-absent capability: no task-manager action exists; also not an APPS entry"}
+{"utterance": "open vscode", "expect": "NO_MATCH", "params": {}, "note": "plausible-but-unregistered app: 'vscode' is not a key in APPS; must not resolve to notepad or calculator"}
+{"utterance": "launch word", "expect": "NO_MATCH", "params": {}, "note": "plausible-but-unregistered app: 'word' is not a key in APPS; must not resolve to notepad or calculator"}
+{"utterance": "start steam", "expect": "NO_MATCH", "params": {}, "note": "plausible-but-unregistered app: 'steam' is not a key in APPS; must not resolve to notepad or calculator"}
+{"utterance": "open windows update settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage; unrepresentable by design"}
+{"utterance": "open storage settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage; unrepresentable by design"}
+{"utterance": "open privacy settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage; unrepresentable by design"}
+{"utterance": "open accounts settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage; unrepresentable by design"}
+{"utterance": "open defender settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage, and is also on the section 8 permanent exclusion list (modify_security_settings)"}
+{"utterance": "open firewall settings", "expect": "NO_MATCH", "params": {}, "note": "settings page exists in Windows but is absent from SettingPage, and is also on the section 8 permanent exclusion list (modify_security_settings)"}
+{"utterance": "close the virtual desktop", "expect": "NO_MATCH", "params": {}, "note": "names a real action's domain (virtual desktops) but asks for something open_new_desktop cannot do -- it only creates, never closes"}
+{"utterance": "turn the volume down on shutdown", "expect": "NO_MATCH", "params": {}, "note": "names a real action (shutdown_pc) but composes it with a capability the registry does not have (volume control); neither half is satisfiable as a single action"}
