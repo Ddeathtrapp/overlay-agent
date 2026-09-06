@@ -106,6 +106,7 @@ _REJECTION_EXIT_CODES: dict[RejectionCode, int] = {
     RejectionCode.NOT_CONFIRMED: 3,
     RejectionCode.NO_CONFIRMER: 3,
     RejectionCode.RATE_LIMITED: 4,
+    RejectionCode.CONFIRMATION_PENDING: 7,
 }
 
 

@@ -360,7 +360,20 @@ the user at their own desk; it is a phone session in someone else's hands,
 which is a transport concern (see threat-model.md T5) and is handled by
 session expiry there. The policy engine tracks exceptions, not presence.
 
-**12.4 — Serial execution.**
-One action at a time, FIFO queue. Removes an entire class of race condition
-for near-zero cost. Nothing in the design requires parallel actions. A second
-request arriving while one is in flight queues; it does not interleave.
+**12.4 — Serial execution. Concurrent requests are REJECTED, not queued.**
+One action at a time. A request arriving while a confirmation is open is
+rejected with CONFIRMATION_PENDING (exit 7) and the caller retries.
+
+Rejecting rather than queuing is a deliberate first stage, not the end
+state. A queued action firing minutes after it was asked for is its own
+surprise, and a queue needs a depth limit, an expiry, and a way to inspect
+and cancel what is pending — none of which exist yet. Rejection needs none
+of them.
+
+**Planned:** a bounded queue, so several requests can be given at once and
+resolved in order rather than the caller retrying. This changes what the
+confirmation dialog must show — approving item 1 of 3 requires seeing all
+three — so it depends on the Phase 4 UI and is not scheduled before Phase 7.
+Requirements when it lands: bounded depth, per-item expiry, inspectable and
+cancellable pending list, and no reordering. Until then, rejection is the
+documented behaviour and CONFIRMATION_PENDING is its code.
