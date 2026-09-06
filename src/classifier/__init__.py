@@ -1,1 +1,1 @@
-"""Policy engine — the security boundary. Human-owned; no agent writes here."""
+"""Classifier — maps utterances to action proposals under constrained decoding."""
