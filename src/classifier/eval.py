@@ -29,10 +29,12 @@ as `-m`'s target package; running from `src/classifier/` fails to import
 Eval-set honesty
 -----------------
 docs/action-registry.md §10 calls for 100 labeled utterances across the
-registry plus 30 that must return NO_MATCH. `tests/eval/phase1.jsonl` has
-far fewer rows than that (this harness prints the exact counts on every
-run). Numbers produced here are indicative only and do NOT constitute
-meeting the §10 gate — the report says so every time, on purpose.
+registry plus 30 that must return NO_MATCH. The harness derives the actual
+counts from `tests/eval/phase1.jsonl` on every run and reports whether the
+gate is met — never hardcoded here, because an assertion about row counts
+written into a docstring goes stale silently the moment the file changes.
+Meeting the size gate says nothing about whether the reported rates are
+good; the report states that distinction every time, on purpose.
 """
 
 from __future__ import annotations
