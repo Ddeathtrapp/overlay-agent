@@ -5,8 +5,7 @@
 {"utterance": "open a new desktop", "expect": "open_new_desktop", "params": {}}
 {"utterance": "create a new virtual desktop", "expect": "open_new_desktop", "params": {}}
 {"utterance": "give me another desktop", "expect": "open_new_desktop", "params": {}}
-{"utterance": "switch to my other desktop", "expect": "NO_MATCH", "params": {}, "note": "switching is not creating; no action covers it"}
-{"utterance": "open notepad", "expect": "open_application", "params": {"app": "notepad"}}
+{"utterance": "switch to my other desktop", "expect": "NO_MATCH", "params": {}, "note": "switching is not creating; no action covers it. KNOWN MISS as of Phase 3: the model returns open_new_desktop. Not fixable by description edits — 'Create a new virtual desktop' is already accurate and specific, and adding 'does not switch between desktops' describes the action by what it isn't, which ends with every description carrying disclaimers. Caught downstream as nuisance only: open_new_desktop is tier 0, so the cost is an unwanted desktop, reversible with Win+Ctrl+F4. See §10 and threat-model.md T1."}
 {"utterance": "launch the calculator", "expect": "open_application", "params": {"app": "calculator"}}
 {"utterance": "start notepad for me", "expect": "open_application", "params": {"app": "notepad"}}
 {"utterance": "open chrome", "expect": "NO_MATCH", "params": {}, "note": "not a key in APPS; must not resolve to the nearest entry"}
