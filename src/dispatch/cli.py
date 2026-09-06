@@ -15,6 +15,17 @@ Usage:
     python src/dispatch/cli.py exceptions list
     python src/dispatch/cli.py exceptions revoke <action_id> [key=value ...]
     python src/dispatch/cli.py exceptions revoke-all
+    python src/dispatch/cli.py say "open notepad"
+    python src/dispatch/cli.py say "open notepad" --dry-run
+
+`say` is the classifier-mediated path: an utterance goes to
+`classifier.classify.Classifier`, which returns a PROPOSAL (an action id and
+raw parameter strings), never an `ActionRequest` and never a call to a
+handler. That proposal reaches `PolicyEngine.execute` the same way any other
+proposal here does, with `source=Source.DESKTOP` stamped as a literal by
+this module, never by the classifier (threat-model.md T12). The classifier
+import is deliberately lazy -- see `_say` -- so every other subcommand keeps
+working with Ollama stopped and pays none of its import cost.
 """
 from __future__ import annotations
 
@@ -76,6 +87,14 @@ def _runtime() -> tuple[PolicyEngine, ExceptionStore]:
 #   2  UNKNOWN_ACTION, BAD_ARITY, PARAM_REJECTED
 #   3  NOT_CONFIRMED, NO_CONFIRMER
 #   4  RATE_LIMITED
+#   5  classifier NO_ACTION_MATCHED / PARAM_UNDETERMINED  (comprehension)
+#   6  classifier CLASSIFIER_UNAVAILABLE / REGISTRY_ERROR (infrastructure)
+#
+# 5 and 6 come from `classifier.classify.Reason`, not `RejectionCode` --
+# they are classifier-level outcomes that occur before the engine is ever
+# reached (a NO_MATCH classification never calls `engine.execute`), so
+# they are mapped separately, in `_CLASSIFICATION_EXIT_CODES` near `_say`
+# below, rather than added to `_REJECTION_EXIT_CODES` here.
 #
 # A dict, not an if-chain, so an unmapped RejectionCode cannot silently
 # read as one of these by falling through an `else`.
@@ -146,6 +165,101 @@ def _dispatch(action_id: str, raw_params: list[str]) -> int:
     shaped = _shape_params(action_id, raw_params)
     engine, _ = _runtime()
     result = engine.execute(action_id, shaped, source=Source.DESKTOP)
+
+    if not result.decision.allowed:
+        print(f"reject: {result.decision.reason}", file=sys.stderr)
+    elif result.error is not None:
+        print(f"error: {result.error}", file=sys.stderr)
+
+    return _exit_code(result)
+
+
+# ----------------------------------------------------------------------
+# `say` — classifier-mediated dispatch
+# ----------------------------------------------------------------------
+#
+# NO_MATCH has several causes (`classifier.classify.Reason`), and -- same
+# argument as `_REJECTION_EXIT_CODES` above -- "I didn't understand that"
+# and "the daemon is down" get different exit codes.
+#
+# Keyed by `Reason.name` (a plain string), not by the `Reason` member
+# itself, so this table can live at module scope without a module-level
+# `from classifier... import Reason`. The classifier is imported lazily,
+# inside `_say`, so the direct-dispatch subcommands keep working with
+# Ollama stopped and never pay its import cost.
+
+_CLASSIFICATION_EXIT_CODES: dict[str, int] = {
+    "NO_ACTION_MATCHED": 5,
+    "PARAM_UNDETERMINED": 5,
+    "CLASSIFIER_UNAVAILABLE": 6,
+    "REGISTRY_ERROR": 6,
+}
+
+
+def _classification_exit_code(reason_name: str) -> int:
+    # A dict lookup with an explicit fallback, not `.get(..., 0)` -- an
+    # unmapped Reason must read as an infrastructure failure (nonzero),
+    # never silently as success.
+    try:
+        return _CLASSIFICATION_EXIT_CODES[reason_name]
+    except KeyError:
+        return 6
+
+
+def _say_command(args: list[str]) -> int:
+    dry_run = "--dry-run" in args
+    words = [a for a in args if a != "--dry-run"]
+    utterance = " ".join(words)
+    if not utterance:
+        print('usage: cli.py say "<utterance>" [--dry-run]', file=sys.stderr)
+        return 2
+    return _say(utterance, dry_run=dry_run)
+
+
+def _say(utterance: str, *, dry_run: bool) -> int:
+    """Classify `utterance` and, if matched, run it through the same
+    `engine.execute` call `_dispatch` uses. No `ActionRequest` is built
+    here and no handler is ever called directly -- everything goes through
+    the engine, the one component permitted to invoke a handler.
+
+    `raw_params` from the classification is passed straight through, NOT
+    through `_shape_params` (that exists only to name positional argv;
+    the classifier already returns a name->value mapping). `action_id` is
+    not pre-validated here either -- an id absent from the registry is for
+    the ENGINE to reject (UNKNOWN_ACTION), not a second copy of that check
+    living in the CLI.
+    """
+    from classifier.classify import Classifier  # lazy -- see module docstring
+
+    classification = Classifier(REGISTRY).classify(utterance)
+
+    # Printed unconditionally, before any dispatch decision -- a tier 0
+    # action auto-allows silently, so this is the only visible record of
+    # what the model thought it heard, confirmation or not.
+    print(classification.describe())
+
+    if dry_run:
+        print("dry run: nothing dispatched")
+        return 0
+
+    if not classification.matched:
+        # NO_MATCH must never reach the engine.
+        return _classification_exit_code(classification.reason.name)
+
+    engine, _ = _runtime()
+    # `source=Source.DESKTOP` is a literal here, exactly as in `_dispatch`,
+    # never derived from `classification`, argv, or an environment
+    # variable (threat-model.md T12): there must be no path by which a
+    # payload can claim its own provenance. `utterance=` is the ORIGINAL
+    # string the human typed -- not `classification.describe()` or
+    # anything the model produced -- so that is what reaches the audit
+    # record via `_safe_utterance` (DESKTOP is trusted, so it is logged).
+    result = engine.execute(
+        classification.action_id,
+        classification.raw_params,
+        source=Source.DESKTOP,
+        utterance=utterance,
+    )
 
     if not result.decision.allowed:
         print(f"reject: {result.decision.reason}", file=sys.stderr)
@@ -272,7 +386,8 @@ def main(argv: list[str]) -> int:
     if not argv:
         print(
             "usage: cli.py <action_id> [param ...] | cli.py list | "
-            "cli.py exceptions <list|revoke|revoke-all> ...",
+            "cli.py exceptions <list|revoke|revoke-all> ... | "
+            'cli.py say "<utterance>" [--dry-run]',
             file=sys.stderr,
         )
         return 2
@@ -283,6 +398,9 @@ def main(argv: list[str]) -> int:
 
     if argv[0] == "exceptions":
         return _exceptions_command(argv[1:])
+
+    if argv[0] == "say":
+        return _say_command(argv[1:])
 
     return _dispatch(argv[0], argv[1:])
 
