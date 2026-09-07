@@ -10,11 +10,20 @@ the real `%LOCALAPPDATA%\\overlay-agent\\audit.jsonl`.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
-from _helpers import StubConfirmer, build_engine
+from _helpers import StubConfirmer, assert_raises, build_engine
 
 import policy.audit as audit_module
-from policy.audit import AuditLog, _params_for_log, _safe_action_id, _safe_reason, _safe_utterance
+from policy.audit import (
+    GENESIS,
+    AuditLog,
+    AuditWriteFailed,
+    _params_for_log,
+    _safe_action_id,
+    _safe_reason,
+    _safe_utterance,
+)
 from policy.confirm import ConfirmationReply
 from policy.types import ActionRequest, Decision, Outcome, RejectionCode, Source
 
@@ -442,3 +451,179 @@ def test_verify_chain_not_anchored_when_oldest_retained_lacks_genesis(
     assert status.intact is True
     assert status.anchored_at_genesis is False
     assert "rotated away" in status.reason
+
+
+# --- KI-2: cross-process hash-chain consistency ----------------------------
+#
+# `_prev_hash` used to be resolved once at construction and never re-read;
+# two long-lived `AuditLog` instances against the same file (e.g. the
+# running assistant and a CLI invocation) would both link their next record
+# to the same stale predecessor, producing a permanent `prev` mismatch
+# indistinguishable from tampering. The fix resolves the predecessor inside
+# the cross-process file lock, immediately before each write, trusting the
+# in-memory cache only when `(mtime_ns, size)` proves nothing has appended
+# since this instance's own last write.
+
+
+def test_ki2_interleaved_writers_produce_intact_chain(tmp_path) -> None:
+    """KI-2 regression test: two `AuditLog` instances against the same
+    path, appending in strict alternation (A, B, A, B, ...), must produce a
+    chain `verify_chain()` reports as intact. Before the fix this failed
+    reliably -- every record after the first written by the "other" process
+    broke the chain, because each instance kept linking to its own last
+    write instead of the file's actual last write.
+    """
+    path = tmp_path / "audit.jsonl"
+    a = AuditLog(path)
+    b = AuditLog(path)
+
+    for i in range(8):
+        (a if i % 2 == 0 else b).note("interleave-test", {"i": i})
+
+    status = a.verify_chain()
+    assert status.intact is True
+    assert status.anchored_at_genesis is True
+
+
+def test_ki2_second_instance_links_to_first_instances_last_hash(tmp_path) -> None:
+    """A second instance appending after the first must not restart the
+    chain from genesis: its first record's `prev` must equal the first
+    instance's last record's `hash`.
+    """
+    path = tmp_path / "audit.jsonl"
+    a = AuditLog(path)
+    a.note("a-note-1")
+    a.note("a-note-2")
+
+    b = AuditLog(path)  # fresh instance, same file, never seen a's writes
+    b.note("b-note-1")
+
+    lines = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 3
+    a_last_hash = lines[1]["hash"]
+    b_first = lines[2]
+    assert b_first["prev"] == a_last_hash
+    assert b_first["prev"] != GENESIS
+
+
+def test_ki2_cache_bypassed_when_file_changed_underneath(tmp_path) -> None:
+    """The in-memory cache must be bypassed once the file has changed
+    underneath its owner. `a` writes and warms its cache, `b` appends
+    (changing the file's mtime/size without `a`'s knowledge), then `a`
+    appends again -- `a` must link to `b`'s record, not to its own stale
+    cached hash. This is the two-instance version of the scenario the fix
+    exists for, preferred over poking `_stamp` directly.
+    """
+    path = tmp_path / "audit.jsonl"
+    a = AuditLog(path)
+    b = AuditLog(path)
+
+    a.note("a-1")  # a's cache now points at a's own last hash
+    b.note("b-1")  # file changes underneath a, without a's involvement
+    a.note("a-2")  # a must detect the stamp mismatch and re-read the tail
+
+    lines = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 3
+    b_hash = lines[1]["hash"]
+    a_2 = lines[2]
+    assert a_2["prev"] == b_hash, "a linked to its own stale cache, not b's record"
+
+    status = a.verify_chain()
+    assert status.intact is True
+
+
+def test_ki2_failed_write_clears_cache_and_recovers(tmp_path, monkeypatch) -> None:
+    """A failed write must clear the cache, not leave it pointing at a hash
+    for a record that was never written. Patch the file open used inside
+    `_append`'s write step so one call raises, assert `AuditWriteFailed`
+    propagates and `_prev_hash`/`_stamp` are cleared, then let a real
+    append succeed afterwards and confirm it links to the correct tail
+    (the last record that actually made it to disk) with an intact chain.
+    """
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path)
+    audit.note("seed")  # warm the cache
+    assert audit._prev_hash is not None
+    assert audit._stamp is not None
+
+    original_open = Path.open
+
+    def _boom_open(self: Path, *args: object, **kwargs: object):
+        if self == path and args[:1] == ("a",):
+            raise OSError("simulated disk failure")
+        return original_open(self, *args, **kwargs)
+
+    with monkeypatch.context() as m:
+        m.setattr(Path, "open", _boom_open)
+        assert_raises(AuditWriteFailed, audit.note, "boom")
+
+    assert audit._prev_hash is None
+    assert audit._stamp is None
+
+    audit.note("recovered")  # real append, patch no longer in effect
+
+    lines = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    # "boom" never reached disk -- only "seed" and "recovered" are present.
+    assert [ln["event"] for ln in lines] == ["seed", "recovered"]
+    assert lines[1]["prev"] == lines[0]["hash"]
+
+    status = audit.verify_chain()
+    assert status.intact is True
+
+
+def test_ki2_read_last_hash_widens_when_tail_chunk_has_no_complete_line(tmp_path) -> None:
+    """`_read_last_hash` reads backwards in `_TAIL_BYTES`-sized chunks and
+    widens when the chunk holds no complete line. Force a single record
+    (via a large `note()` detail) whose JSON line exceeds `_TAIL_BYTES`
+    (8192), so the final 8192-byte tail holds only a truncated fragment of
+    it -- dropped as possibly-truncated -- and the loop must widen to find
+    the real last hash rather than falling back to GENESIS.
+    """
+    path = tmp_path / "audit.jsonl"
+    audit = AuditLog(path)
+    audit.note("small-1")
+    audit.note("big-record", {"blob": "X" * 9000})  # single line > 8192 bytes
+
+    # A fresh instance has no cache at all, so its next write is forced
+    # through `_read_last_hash` and must find the big record's real hash.
+    other = AuditLog(path)
+    other.note("after-big")
+
+    lines = [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 3
+    big_line_length = len(json.dumps(lines[1]))
+    assert big_line_length > audit_module._TAIL_BYTES, "test setup did not exceed _TAIL_BYTES"
+    big_hash = lines[1]["hash"]
+    assert lines[2]["prev"] == big_hash
+    assert lines[2]["prev"] != GENESIS
+
+    status = audit.verify_chain()
+    assert status.intact is True
+
+
+def test_ki2_chain_intact_across_rotation_mid_interleave(tmp_path, monkeypatch) -> None:
+    """The chain must stay intact when a rotation happens in the middle of
+    an interleaved multi-instance run. Pin `len(log._chain_files())` first,
+    per the KI-2 fix history: too many records at a small `MAX_BYTES` can
+    exceed `KEEP_ROTATIONS` and purge the genesis-anchored file, silently
+    turning this into a "rotation with purge" test instead of the intended
+    "rotation with anchor" one.
+    """
+    monkeypatch.setattr(audit_module, "MAX_BYTES", 200)
+    path = tmp_path / "audit.jsonl"
+    a = AuditLog(path)
+    b = AuditLog(path)
+
+    for i in range(10):  # same order of magnitude as the single-writer
+        (a if i % 2 == 0 else b).note("rotate-interleave", {"i": i})  # rotation test
+
+    files = a._chain_files()
+    assert 1 < len(files) <= audit_module.KEEP_ROTATIONS + 1, (
+        "test setup left the run outside the intended rotation-with-anchor "
+        "state (either no rotation happened, or retention purged the "
+        "genesis-anchored file)"
+    )
+
+    status = a.verify_chain()
+    assert status.intact is True
+    assert status.anchored_at_genesis is True

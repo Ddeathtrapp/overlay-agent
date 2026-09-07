@@ -20,9 +20,9 @@ from policy.exceptions import (
     ExceptionStore,
     Grant,
     _canonical,
-    _FileLock,
     signature,
 )
+from policy.filelock import FileLock as _FileLock
 
 
 class _Color(Enum):

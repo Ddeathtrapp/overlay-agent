@@ -7,6 +7,24 @@ leaves evidence the action was attempted.
 This is what makes threat-model.md T5 (stolen phone or token) survivable:
 the attacker is bounded by the registry, and the log is how you find out
 what they did.
+
+Cross-process chaining (KI-2)
+-----------------------------
+The hash chain is inherently sequential: each record links to the one
+before it. `_prev_hash` used to be cached at construction and the only
+mutual exclusion was a per-process `threading.Lock`, so two processes
+both appended from the same predecessor and produced a permanent `prev`
+mismatch — indistinguishable from tampering.
+
+That is the same failure as the rotation false-break already fixed, by a
+different route, and it is worse than a missing feature: an integrity
+control that cries wolf is one the reader learns to ignore, which is
+exactly how T5's evidence trail is lost.
+
+So the predecessor is resolved INSIDE a cross-process lock, immediately
+before the write. The cached hash is used only when `(mtime_ns, size)`
+proves nothing has appended since our own last write — the common
+single-process case, where the tail read would be pure cost.
 """
 
 from __future__ import annotations
@@ -21,6 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from .filelock import FileLock
 from .types import ActionRequest, Decision, Outcome, RejectionCode, Source
 
 log = logging.getLogger(__name__)
@@ -28,6 +47,11 @@ log = logging.getLogger(__name__)
 MAX_BYTES = 5 * 1024 * 1024
 KEEP_ROTATIONS = 5
 GENESIS = "0" * 16
+
+# How much of the file's tail to read when resolving the predecessor.
+# Records run a few hundred bytes, so this holds several; the reader
+# widens automatically if it does not contain a complete line.
+_TAIL_BYTES = 8192
 
 
 class AuditWriteFailed(Exception):
@@ -57,11 +81,6 @@ def _safe_utterance(request: ActionRequest) -> str | None:
     password manager, an email, a private document. Writing it to a
     long-lived file on disk would turn the audit log into a keylogger
     with extra steps.
-
-    Parameters are always safe to log by construction — §3 restricts them
-    to enum members, bounded ints, and whitelist keys, none of which can
-    carry arbitrary text. That property is what lets this log be detailed
-    and safe at the same time.
     """
     if request.source is Source.SCREEN_CONTEXT:
         return None
@@ -107,6 +126,7 @@ def _safe_action_id(request: ActionRequest, decision: Decision) -> str:
         return "<redacted>"
     return request.action_id
 
+
 # --------------------------------------------------------------------------
 # Records
 # --------------------------------------------------------------------------
@@ -114,7 +134,7 @@ def _safe_action_id(request: ActionRequest, decision: Decision) -> str:
 
 @dataclass(frozen=True, slots=True)
 class Record:
-    kind: str  # "decision" | "completion"
+    kind: str  # "decision" | "completion" | "note"
     request_id: str
     ts: datetime
     payload: dict
@@ -146,7 +166,7 @@ def _chain_hash(prev_hash: str, body: Mapping[str, object]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Log
+# Chain status
 # --------------------------------------------------------------------------
 
 
@@ -164,6 +184,10 @@ class ChainStatus:
         return self.intact
 
 
+# --------------------------------------------------------------------------
+# Log
+# --------------------------------------------------------------------------
+
 
 class AuditLog:
     """Append-only JSONL. One line per event, never rewritten.
@@ -178,11 +202,18 @@ class AuditLog:
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or default_log_path()
         self._lock = threading.Lock()
-        self._prev_hash = self._read_last_hash()
+        # Resolved lazily, inside the file lock, at the first write.
+        # Reading it at construction is what made the chain break across
+        # processes: a value read minutes before a write says nothing
+        # about what the file looks like at write time.
+        self._prev_hash: str | None = None
+        self._stamp: tuple[int, int] | None = None
 
     # -- writes ------------------------------------------------------------
 
-    def decision(self, request: ActionRequest, decision: Decision, tier: int | None) -> None:
+    def decision(
+        self, request: ActionRequest, decision: Decision, tier: int | None
+    ) -> None:
         """Write before the handler runs. Rejections are logged too — a
         rejected request is often the more interesting one."""
         self._append(
@@ -203,7 +234,9 @@ class AuditLog:
             )
         )
 
-    def completion(self, request: ActionRequest, ok: bool, error: str | None = None) -> None:
+    def completion(
+        self, request: ActionRequest, ok: bool, error: str | None = None
+    ) -> None:
         """Write after the handler returns or raises."""
         self._append(
             Record(
@@ -302,38 +335,101 @@ class AuditLog:
 
     # -- internals ---------------------------------------------------------
 
-    def _read_last_hash(self) -> str:
+    def _stamp_now(self) -> tuple[int, int] | None:
         try:
-            with self._path.open("r", encoding="utf-8") as fh:
-                last = None
-                for line in fh:
-                    if line.strip():
-                        last = line
-                if last:
-                    return json.loads(last).get("hash", GENESIS)
+            st = self._path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _current_prev_hash(self) -> str:
+        """The hash this record must link to. Caller holds the file lock.
+
+        The cached value is trusted only when `(mtime_ns, size)` matches
+        what it was after our own last write. Any change means another
+        process appended, and the tail must be re-read — that check is
+        the whole of the KI-2 fix.
+        """
+        if self._prev_hash is not None and self._stamp_now() == self._stamp:
+            return self._prev_hash
+        return self._read_last_hash()
+
+    def _read_last_hash(self) -> str:
+        """Hash of the final record, read from the tail of the file.
+
+        Reads backwards from the end rather than iterating the whole file:
+        this runs on every append that follows another process's write,
+        and the log grows to 5MB before rotating.
+        """
+        try:
+            with self._path.open("rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                if size == 0:
+                    return GENESIS
+                chunk = min(size, _TAIL_BYTES)
+                while True:
+                    fh.seek(size - chunk)
+                    data = fh.read(chunk)
+                    lines = [ln for ln in data.split(b"\n") if ln.strip()]
+                    # If we did not read from byte zero, the first line in
+                    # the chunk may be truncated — drop it.
+                    if chunk < size and lines:
+                        lines = lines[1:]
+                    if lines or chunk >= size:
+                        break
+                    chunk = min(size, chunk * 4)
         except FileNotFoundError:
-            pass
+            return GENESIS
         except Exception:
             log.exception("could not read tail of audit log; starting a new chain")
-        return GENESIS
+            return GENESIS
+
+        if not lines:
+            return GENESIS
+        try:
+            return json.loads(lines[-1]).get("hash", GENESIS)
+        except Exception:
+            log.exception("last audit record is unparseable; starting a new chain")
+            return GENESIS
 
     def _append(self, record: Record) -> None:
         with self._lock:
             try:
-                self._rotate_if_needed()
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                body = record.to_json(self._prev_hash)
-                with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(json.dumps(body, default=str) + "\n")
-                    fh.flush()
-                    os.fsync(fh.fileno())  # survive a crash mid-action
-                self._prev_hash = body["hash"]
+                with FileLock(self._path):
+                    self._path.parent.mkdir(parents=True, exist_ok=True)
+                    # Resolve the predecessor BEFORE rotating. Rotation
+                    # moves the current file to .1 and leaves an empty
+                    # one, and the chain continues across that boundary —
+                    # reading afterwards would see an empty file and
+                    # restart from genesis, which verify_chain would then
+                    # correctly report as a break.
+                    prev = self._current_prev_hash()
+                    self._rotate_if_needed()
+
+                    body = record.to_json(prev)
+                    with self._path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(body, default=str) + "\n")
+                        fh.flush()
+                        os.fsync(fh.fileno())  # survive a crash mid-action
+
+                    self._prev_hash = body["hash"]
+                    self._stamp = self._stamp_now()
             except Exception as exc:
+                # The cache cannot be trusted after a failed write; the
+                # next append re-reads the tail rather than linking to a
+                # record that may not be there.
+                self._prev_hash = None
+                self._stamp = None
                 raise AuditWriteFailed(f"could not write audit record: {exc}") from exc
 
     def _rotate_if_needed(self) -> None:
-        """Caller holds the lock. The chain continues across rotations —
-        the new file's first record still points at the old file's last."""
+        """Caller holds the threading lock AND the file lock.
+
+        Under the file lock so two processes cannot rotate concurrently —
+        which would shuffle the numbered files out from under each other
+        and lose records that `_chain_files` still expects to walk.
+        """
         try:
             if not self._path.exists() or self._path.stat().st_size < MAX_BYTES:
                 return

@@ -36,13 +36,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-import sys
 import threading
+from .filelock import FileLock
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import IO, Iterable, Mapping
+from typing import Iterable, Mapping
 
 log = logging.getLogger(__name__)
 
@@ -58,67 +58,6 @@ class ExceptionRefused(Exception):
     silently-dropped grant would leave the user believing a permission
     exists when it does not."""
 
-
-# --------------------------------------------------------------------------
-# Cross-process lock
-# --------------------------------------------------------------------------
-
-
-def _lock_fh(fh: IO[bytes]) -> None:
-    if sys.platform == "win32":
-        import msvcrt
-
-        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-
-
-def _unlock_fh(fh: IO[bytes]) -> None:
-    if sys.platform == "win32":
-        import msvcrt
-
-        fh.seek(0)
-        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
-    else:
-        import fcntl
-
-        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-
-
-class _FileLock:
-    """Advisory lock held for the duration of a read-modify-write.
-
-    An OS-level lock rather than a lock file created with O_EXCL,
-    specifically because the OS releases it when the process dies. A
-    lock file left behind by a crash would block every future grant and
-    revoke, which turns a crash into a permanently unrevokable
-    permission — the opposite of what §12.1 asks for.
-    """
-
-    def __init__(self, target: Path) -> None:
-        self._path = target.with_suffix(target.suffix + ".lock")
-        self._fh: IO[bytes] | None = None
-
-    def __enter__(self) -> "_FileLock":
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._path, "a+b")
-        self._fh.write(b"\0")  # msvcrt locks a byte range; there must be a byte
-        self._fh.seek(0)
-        _lock_fh(self._fh)
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        if self._fh is None:
-            return
-        try:
-            _unlock_fh(self._fh)
-        except OSError:
-            log.warning("could not release exception store lock", exc_info=True)
-        finally:
-            self._fh.close()
-            self._fh = None
 
 
 # --------------------------------------------------------------------------
@@ -266,7 +205,7 @@ class ExceptionStore:
             )
         sig = signature(params)  # raises on uncanonicalisable values
         grant = Grant(action_id, sig, datetime.now(timezone.utc))
-        with self._lock, _FileLock(self._path):
+        with self._lock, FileLock(self._path):
             # Reload inside the lock so this write cannot clobber a revoke
             # another process made since we last read.
             self._reload_locked()
@@ -281,7 +220,7 @@ class ExceptionStore:
             key = (action_id, signature(params))
         except ExceptionRefused:
             return False
-        with self._lock, _FileLock(self._path):
+        with self._lock, FileLock(self._path):
             self._reload_locked()
             removed = self._grants.pop(key, None)
             if removed is not None:
@@ -292,7 +231,7 @@ class ExceptionStore:
 
     def revoke_all(self) -> int:
         """Remove every exception. Returns how many were removed."""
-        with self._lock, _FileLock(self._path):
+        with self._lock, FileLock(self._path):
             self._reload_locked()
             count = len(self._grants)
             self._grants.clear()
@@ -309,7 +248,7 @@ class ExceptionStore:
         is one the user stops reading, which defeats §12.1.
         """
         known = set(known_action_ids)
-        with self._lock, _FileLock(self._path):
+        with self._lock, FileLock(self._path):
             self._reload_locked()
             dead = [k for k in self._grants if k[0] not in known]
             for k in dead:

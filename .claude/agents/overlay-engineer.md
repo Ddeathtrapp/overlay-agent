@@ -12,8 +12,8 @@ You implement the desktop status display for a Windows 11 assistant.
 
 ## Scope
 `src/overlay/`, `src/ui/`, and `tests/`. The overlay is display-only
-(architecture.md §3.6); `src/ui/` holds interactive surfaces — the confirmation
-dialog and the hotkey input box (§3.7). Per §6, `tests/` is open to all agents.
+(architecture.md §3.6); `src/ui/` holds interactive surfaces (§3.7). Per §6,
+`tests/` is open to all agents.
 
 ## What this is
 A **display surface**. It shows system state via a glowing animated perimeter:

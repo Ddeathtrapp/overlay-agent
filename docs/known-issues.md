@@ -6,13 +6,6 @@ struck through — git history is the record.
 ## Open
 
 
-### KI-2 — Audit chain false break across processes  (HIGH)
-`_prev_hash` is cached at construction and the only mutual exclusion is a
-per-process `threading.Lock`. Two processes both append from H0, producing
-a permanent `prev` mismatch indistinguishable from tampering. Same class as
-the rotation false-break already fixed: an integrity control that cries
-wolf is one the reader learns to ignore.
-
 ### KI-3 — ExecutionResult discarded in assistant.py:473  (MEDIUM)
 A rate-limited shutdown, after the user has typed the challenge word, is
 silent and indistinguishable from success.
