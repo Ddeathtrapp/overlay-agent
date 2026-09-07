@@ -247,21 +247,48 @@ def test_timeout_denies(monkeypatch) -> None:
 
 def test_window_close_denies(monkeypatch) -> None:
     _install_fake_tkinter(monkeypatch)
-    _FakeRoot.mainloop_hook = lambda root: root.protocols["WM_DELETE_WINDOW"]()
+
+    hook_ran = False
+
+    def hook(root) -> None:
+        nonlocal hook_ran
+        root.protocols["WM_DELETE_WINDOW"]()
+        hook_ran = True
+
+    _FakeRoot.mainloop_hook = hook
     prompt = _tier0_prompt()
 
     reply = DesktopConfirmer().ask(prompt)
 
+    # `ask()` swallows any exception from the hook and returns a denial by
+    # default (see confirm_dialog.py's blanket `except Exception`), which is
+    # exactly what this test also expects -- so a KeyError from a missing
+    # "WM_DELETE_WINDOW" protocol would be indistinguishable from a real
+    # close working correctly unless the hook's completion is checked too.
+    assert hook_ran, "mainloop_hook did not run"
     assert reply.approved is False
 
 
 def test_escape_denies(monkeypatch) -> None:
     _install_fake_tkinter(monkeypatch)
-    _FakeRoot.mainloop_hook = lambda root: root.bindings["<Escape>"]()
+
+    hook_ran = False
+
+    def hook(root) -> None:
+        nonlocal hook_ran
+        root.bindings["<Escape>"]()
+        hook_ran = True
+
+    _FakeRoot.mainloop_hook = hook
     prompt = _tier0_prompt()
 
     reply = DesktopConfirmer().ask(prompt)
 
+    # Same reasoning as test_window_close_denies: a missing "<Escape>"
+    # binding would raise KeyError, get swallowed, and produce the same
+    # `approved=False` this test expects -- assert the hook actually ran
+    # so that failure mode is caught instead of masked.
+    assert hook_ran, "mainloop_hook did not run"
     assert reply.approved is False
 
 
@@ -321,10 +348,25 @@ def test_tier_two_allow_disabled_until_exact_match(monkeypatch) -> None:
 
 
 def test_tier_two_allow_disabled_on_case_mismatch(monkeypatch) -> None:
+    # NOTE: this test used to assert *inside* the hook. Any AssertionError
+    # raised there is caught by DesktopConfirmer.ask()'s blanket
+    # `except Exception` (confirm_dialog.py) and converted into
+    # ConfirmationReply(approved=False) -- which is exactly what the final
+    # `assert reply.approved is False` below also expects. That made the
+    # in-hook asserts inert: injecting `assert False` as the first line of
+    # the hook still left this test passing. Recording observations into
+    # `seen` (defined outside the hook) and asserting on them after `ask()`
+    # returns closes that hole -- a failed assertion now fails the test
+    # instead of being swallowed and reinterpreted as "the dialog was
+    # denied, as expected."
     fake = _install_fake_tkinter(monkeypatch)
     prompt = _tier2_prompt()
 
+    hook_ran = False
+    seen: dict[str, str] = {}
+
     def hook(root) -> None:
+        nonlocal hook_ran
         entry = fake.Entry.instances[0]
         entry_var = entry.kwargs["textvariable"]
         allow = _button(fake, "Allow")
@@ -332,24 +374,45 @@ def test_tier_two_allow_disabled_on_case_mismatch(monkeypatch) -> None:
         # Case mismatch: verify() folds nothing, so the button must stay
         # disabled even though the text is otherwise correct.
         entry_var.set("SHUTDOWN_PC")
-        assert allow.state == fake.DISABLED
+        seen["upper"] = allow.state
 
         entry_var.set("Shutdown_Pc")
-        assert allow.state == fake.DISABLED
+        seen["mixed_case"] = allow.state
 
         # Exact match now enables it...
         entry_var.set("shutdown_pc")
-        assert allow.state == fake.NORMAL
+        seen["exact"] = allow.state
 
-        # ...and drifting back off the exact match disables it again.
+        # ...and whitespace around an otherwise-exact match is ACCEPTED:
+        # on_challenge_changed (confirm_dialog.py) strips before comparing,
+        # matching Confirmer.verify's `reply.typed.strip() ==
+        # prompt.challenge` (policy/confirm.py). The UI and verify() must
+        # agree here, not contradict each other.
         entry_var.set("shutdown_pc ")
-        assert allow.state == fake.DISABLED
+        seen["trailing_space"] = allow.state
 
+        entry_var.set(" shutdown_pc")
+        seen["leading_space"] = allow.state
+
+        # ...but drifting off the exact text (not just whitespace) disables
+        # it again -- this is the real tier-2 friction property.
+        entry_var.set("shutdown_pcx")
+        seen["drifted"] = allow.state
+
+        hook_ran = True
         _button(fake, "Deny").invoke()
 
     _FakeRoot.mainloop_hook = hook
 
     reply = DesktopConfirmer().ask(prompt)
+
+    assert hook_ran, "mainloop_hook did not run"
+    assert seen["upper"] == fake.DISABLED
+    assert seen["mixed_case"] == fake.DISABLED
+    assert seen["exact"] == fake.NORMAL
+    assert seen["trailing_space"] == fake.NORMAL
+    assert seen["leading_space"] == fake.NORMAL
+    assert seen["drifted"] == fake.DISABLED
     assert reply.approved is False
 
 
@@ -357,16 +420,21 @@ def test_tier_two_allow_click_reports_typed_value(monkeypatch) -> None:
     fake = _install_fake_tkinter(monkeypatch)
     prompt = _tier2_prompt()
 
+    hook_ran = False
+
     def hook(root) -> None:
+        nonlocal hook_ran
         entry = fake.Entry.instances[0]
         entry_var = entry.kwargs["textvariable"]
         entry_var.set("shutdown_pc")
         _button(fake, "Allow").invoke()
+        hook_ran = True
 
     _FakeRoot.mainloop_hook = hook
 
     reply = DesktopConfirmer().ask(prompt)
 
+    assert hook_ran, "mainloop_hook did not run"
     assert reply.approved is True
     assert reply.typed == "shutdown_pc"
     # Tier 2 never offers "always allow" -- build_prompt forces
@@ -410,16 +478,21 @@ def test_allow_reply_has_real_bools(monkeypatch) -> None:
     fake = _install_fake_tkinter(monkeypatch)
     prompt = _tier0_prompt(source_trusted=True)
 
+    hook_ran = False
+
     def hook(root) -> None:
+        nonlocal hook_ran
         checkbox = fake.Checkbutton.instances[0]
         remember_var = checkbox.kwargs["variable"]
         remember_var.set(True)
         _button(fake, "Allow").invoke()
+        hook_ran = True
 
     _FakeRoot.mainloop_hook = hook
 
     reply = DesktopConfirmer().ask(prompt)
 
+    assert hook_ran, "mainloop_hook did not run"
     assert reply.approved is True
     assert reply.remember is True
     assert isinstance(reply.approved, bool)
@@ -432,12 +505,29 @@ def test_allow_reply_has_real_bools(monkeypatch) -> None:
 
 
 def test_deny_reply_has_real_bools(monkeypatch) -> None:
+    # NOTE: this used to be `lambda root: _button(fake, "Deny").invoke()`.
+    # If the Deny button ever failed to resolve (e.g. `_button`'s own
+    # internal `assert len(matches) == 1` firing), that AssertionError was
+    # swallowed by ask()'s blanket `except Exception` and turned into the
+    # *default* `_Outcome()` -- approved=False, typed=None, remember=False.
+    # Those defaults already satisfy every assertion below, so this test
+    # passed whether or not the Deny click ever actually happened. The
+    # `hook_ran` flag makes that failure mode visible instead of silent.
     fake = _install_fake_tkinter(monkeypatch)
     prompt = _tier0_prompt()
-    _FakeRoot.mainloop_hook = lambda root: _button(fake, "Deny").invoke()
+
+    hook_ran = False
+
+    def hook(root) -> None:
+        nonlocal hook_ran
+        _button(fake, "Deny").invoke()
+        hook_ran = True
+
+    _FakeRoot.mainloop_hook = hook
 
     reply = DesktopConfirmer().ask(prompt)
 
+    assert hook_ran, "mainloop_hook did not run"
     assert reply.approved is False
     assert isinstance(reply.approved, bool)
     assert isinstance(reply.remember, bool)

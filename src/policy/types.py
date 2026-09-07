@@ -88,6 +88,7 @@ class RejectionCode(str, Enum):
     PARAM_REJECTED = "param_rejected"
     RATE_LIMITED = "rate_limited"
     NOT_CONFIRMED = "not_confirmed"  # human declined, or confirmation timed out
+    NO_CONFIRMER = "no_confirmer"  # nothing available to ask; fail closed
     CONFIRMATION_PENDING = "confirmation_pending"  # another prompt is open
 
 
