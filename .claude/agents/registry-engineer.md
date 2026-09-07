@@ -13,7 +13,8 @@ You implement typed actions for a Windows 11 desktop assistant.
 - `docs/architecture.md` §3.5, §6.
 
 ## Scope
-You own `src/actions/` and `src/dispatch/`. You do not touch anything else.
+You own `src/actions/`, `src/dispatch/`, and `tests/`. Per architecture.md §6,
+`tests/` is open to all agents. You do not touch anything else.
 
 ## Hard rules
 - Every parameter is an `Enum`, a `BoundedInt`, or a `WhitelistKey` into a dict

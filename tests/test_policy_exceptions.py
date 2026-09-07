@@ -7,6 +7,8 @@ here or anywhere else.
 """
 from __future__ import annotations
 
+import json
+import threading
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -18,6 +20,7 @@ from policy.exceptions import (
     ExceptionStore,
     Grant,
     _canonical,
+    _FileLock,
     signature,
 )
 
@@ -191,3 +194,152 @@ def test_grant_to_json_from_json_round_trip() -> None:
     original = Grant("open_app", (("app", "str:notepad"),), datetime.now(timezone.utc))
     restored = Grant.from_json(original.to_json())
     assert restored == original
+
+
+# --- KI-1: cross-process consistency ----------------------------------------
+#
+# The file is the source of truth; the in-memory dict is a view of it. These
+# tests construct two ExceptionStore instances against the same tmp_path
+# file to stand in for two long-lived processes (e.g. the running assistant
+# and a CLI invocation) and assert one sees the other's writes without being
+# reconstructed.
+
+def test_second_store_sees_grant_made_by_first_without_reconstruction(tmp_path) -> None:
+    path = tmp_path / "exceptions.json"
+    store_a = ExceptionStore(path)
+    store_b = ExceptionStore(path)  # constructed up front, same as store_a
+
+    store_a.grant("open_app", 1, {"app": "notepad"})
+
+    # store_b must not be rebuilt to observe this -- its next read reloads
+    # because the file's (mtime_ns, size) stamp no longer matches what it
+    # last saw.
+    assert store_b.matches("open_app", {"app": "notepad"}) is True
+
+
+def test_revoke_all_through_one_store_is_visible_to_another(tmp_path) -> None:
+    path = tmp_path / "exceptions.json"
+    store_a = ExceptionStore(path)
+    store_b = ExceptionStore(path)
+
+    store_a.grant("open_app", 1, {"app": "notepad"})
+    assert store_b.matches("open_app", {"app": "notepad"}) is True
+
+    store_a.revoke_all()
+    assert store_b.matches("open_app", {"app": "notepad"}) is False
+
+
+def test_no_resurrection_after_cross_process_revoke(tmp_path) -> None:
+    """KI-1 regression test.
+
+    Before the rewrite, `grant()` mutated its own cached `_grants` dict
+    without reloading first. If another process (store_b here) revoked
+    everything in the meantime, store_a's next `grant()` would write its
+    stale in-memory dict back to disk -- silently resurrecting the entry
+    that had just been revoked. `grant()` must `_reload_locked()` before
+    mutating so a revoke it didn't witness can't be clobbered.
+
+    This asserts against the file on disk directly, not against
+    `store_a.matches(...)`, so a bug that resurrects the entry in memory
+    but not on disk (or vice versa) cannot hide from it.
+    """
+    path = tmp_path / "exceptions.json"
+    store_a = ExceptionStore(path)
+    store_b = ExceptionStore(path)
+
+    store_a.grant("open_app", 1, {"app": "notepad"})  # X
+    store_b.revoke_all()  # revokes X from underneath store_a
+    store_a.grant("lock_screen", 0, {})  # Y, through the same stale store_a
+
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    ids_on_disk = {entry["action_id"] for entry in on_disk}
+    assert ids_on_disk == {"lock_screen"}
+    assert "open_app" not in ids_on_disk
+
+
+def test_corrupt_file_mid_session_invalidates_warm_cache(tmp_path) -> None:
+    """A file that goes bad mid-session must not be served from a warm
+    cache. Warming the cache first (the `matches() is True` line below) is
+    the whole point of this test -- without it, a store that never cached
+    anything trivially "passes" without exercising the invalidation path
+    at all.
+    """
+    path = tmp_path / "exceptions.json"
+    store = ExceptionStore(path)
+    store.grant("open_app", 1, {"app": "notepad"})
+
+    assert store.matches("open_app", {"app": "notepad"}) is True  # warm cache
+
+    path.write_text("{not json", encoding="utf-8")  # corrupted by "another process"
+
+    assert store.matches("open_app", {"app": "notepad"}) is False
+    assert store.list() == []
+
+
+def test_filelock_releases_on_exception(tmp_path) -> None:
+    """An exception raised inside `with _FileLock(p):` must not leave the
+    OS-level lock held -- that would turn a crash mid-grant into a
+    permanently unrevokable permission (see the module docstring on why
+    this is an OS lock rather than an O_EXCL lock file).
+    """
+    path = tmp_path / "exceptions.json"
+
+    class _Boom(Exception):
+        pass
+
+    with_boom_raised = False
+    try:
+        with _FileLock(path):
+            raise _Boom("simulated failure mid-write")
+    except _Boom:
+        with_boom_raised = True
+    assert with_boom_raised
+
+    # Guard against a hanging test: if the lock did not release, the
+    # second acquisition below would block forever. Acquire it on a
+    # daemon thread with a join timeout instead of acquiring inline.
+    acquired = threading.Event()
+
+    def _try_acquire() -> None:
+        with _FileLock(path):
+            acquired.set()
+
+    t = threading.Thread(target=_try_acquire, daemon=True)
+    t.start()
+    t.join(timeout=5)
+    assert acquired.is_set(), (
+        "_FileLock did not release after an exception; a second "
+        "acquisition blocked instead of succeeding"
+    )
+
+    # And a store can still do real work through the same lock path.
+    store = ExceptionStore(path)
+    store.grant("open_app", 1, {"app": "notepad"})
+    assert store.matches("open_app", {"app": "notepad"}) is True
+
+
+def test_matches_returns_false_for_uncanonicalisable_list_dict_and_object(
+    tmp_path,
+) -> None:
+    path = tmp_path / "exceptions.json"
+    store = ExceptionStore(path)
+    assert store.matches("open_app", {"app": [1, 2]}) is False
+    assert store.matches("open_app", {"app": {"nested": 1}}) is False
+    assert store.matches("open_app", {"app": object()}) is False
+
+
+def test_matches_refresh_path_survives_uncanonicalisable_params(tmp_path) -> None:
+    """Same assertion as above, but forcing the store's cached stamp to be
+    stale first, so the `matches()` call in question actually takes the
+    reload branch of `_refresh_locked` rather than the cheap no-op path.
+    """
+    path = tmp_path / "exceptions.json"
+    store = ExceptionStore(path)
+    store.grant("open_app", 1, {"app": "notepad"})
+
+    other = ExceptionStore(path)
+    other.grant("lock_screen", 0, {})  # changes the file underneath `store`
+
+    assert store.matches("open_app", {"app": [1, 2]}) is False
+    assert store.matches("open_app", {"app": {"nested": 1}}) is False
+    assert store.matches("open_app", {"app": object()}) is False
