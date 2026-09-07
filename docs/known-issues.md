@@ -5,15 +5,6 @@ struck through — git history is the record.
 
 ## Open
 
-### KI-1 — Stale ExceptionStore across processes  (HIGH)
-`ExceptionStore._load()` runs once at construction; `_save()` writes the
-whole in-memory snapshot. The assistant and the CLI hold separate stores,
-so a `revoke-all` from the CLI does not reach a running assistant, and the
-assistant's next grant resurrects revoked entries on disk. §12.1 traded
-expiry for inspect-and-revoke and called it a security contract; the revoke
-half does not hold, and §12.3 means nothing else expires it. T5's response
-to a compromised session — revoke the standing permission — does not work.
-Latent until Phase 4; the long-lived engine made it real.
 
 ### KI-2 — Audit chain false break across processes  (HIGH)
 `_prev_hash` is cached at construction and the only mutual exclusion is a

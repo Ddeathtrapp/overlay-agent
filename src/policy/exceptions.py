@@ -8,6 +8,27 @@ The store answers exactly one question: "has the human already said yes
 to this precise thing?" It does not know about tiers beyond refusing to
 store Tier 2, does not know about rate limits, and cannot grant anything
 on its own — engine.py calls grant() only after a human has confirmed.
+
+Cross-process consistency (KI-1)
+--------------------------------
+The file on disk is the source of truth, not the in-memory dict. Before
+Phase 4 every process was short-lived and re-read the file at
+construction, so this distinction did not matter. The long-lived
+assistant made it matter: with a cached dict, a `revoke-all` from the CLI
+never reached the running assistant, which kept auto-allowing the revoked
+action and then RESURRECTED it on disk at the next grant.
+
+§12.1 traded time-based expiry for inspect-and-revoke and called that a
+security contract. A revoke that does not take is that contract failing,
+and §12.3 means nothing else expires the grant. So:
+
+  - reads reload when the file has changed underneath them
+  - writes take a cross-process lock, reload, mutate, then save
+
+Reads deliberately do NOT take the lock. `os.replace` is atomic, so a
+reader sees either the whole old file or the whole new one, never a torn
+one — and a lock on every `matches()` would serialise the dispatch path
+against an idle CLI holding it.
 """
 
 from __future__ import annotations
@@ -15,12 +36,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import IO, Iterable, Mapping
 
 log = logging.getLogger(__name__)
 
@@ -35,6 +57,68 @@ class ExceptionRefused(Exception):
     """Raised when a grant is not storable. Never returns False — a
     silently-dropped grant would leave the user believing a permission
     exists when it does not."""
+
+
+# --------------------------------------------------------------------------
+# Cross-process lock
+# --------------------------------------------------------------------------
+
+
+def _lock_fh(fh: IO[bytes]) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_fh(fh: IO[bytes]) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        fh.seek(0)
+        msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+class _FileLock:
+    """Advisory lock held for the duration of a read-modify-write.
+
+    An OS-level lock rather than a lock file created with O_EXCL,
+    specifically because the OS releases it when the process dies. A
+    lock file left behind by a crash would block every future grant and
+    revoke, which turns a crash into a permanently unrevokable
+    permission — the opposite of what §12.1 asks for.
+    """
+
+    def __init__(self, target: Path) -> None:
+        self._path = target.with_suffix(target.suffix + ".lock")
+        self._fh: IO[bytes] | None = None
+
+    def __enter__(self) -> "_FileLock":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self._path, "a+b")
+        self._fh.write(b"\0")  # msvcrt locks a byte range; there must be a byte
+        self._fh.seek(0)
+        _lock_fh(self._fh)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._fh is None:
+            return
+        try:
+            _unlock_fh(self._fh)
+        except OSError:
+            log.warning("could not release exception store lock", exc_info=True)
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 # --------------------------------------------------------------------------
@@ -124,16 +208,21 @@ def default_store_path() -> Path:
 class ExceptionStore:
     """Persistent set of standing exceptions.
 
-    Not a cache. If loading fails for any reason the store starts EMPTY,
-    which means every action confirms. That is the fail-closed direction:
-    a corrupt file must never be read as "allow everything".
+    Not a cache. If loading fails for any reason the store is treated as
+    EMPTY, which means every action confirms. That is the fail-closed
+    direction: a corrupt file must never be read as "allow everything".
     """
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or default_store_path()
         self._lock = threading.Lock()
         self._grants: dict[tuple[str, Signature], Grant] = {}
-        self._load()
+        # (mtime_ns, size) of the file as of the last load. None means the
+        # file did not exist. Compared on every read to detect a write by
+        # another process.
+        self._stamp: tuple[int, int] | None = None
+        with self._lock:
+            self._reload_locked()
 
     # -- queries -----------------------------------------------------------
 
@@ -148,6 +237,7 @@ class ExceptionStore:
         except ExceptionRefused:
             return False  # uncanonicalisable input cannot match anything
         with self._lock:
+            self._refresh_locked()
             return key in self._grants
 
     def list(self) -> list[Grant]:
@@ -159,7 +249,10 @@ class ExceptionStore:
         contract rather than a convenience.
         """
         with self._lock:
-            return sorted(self._grants.values(), key=lambda g: g.granted_at, reverse=True)
+            self._refresh_locked()
+            return sorted(
+                self._grants.values(), key=lambda g: g.granted_at, reverse=True
+            )
 
     # -- mutations ---------------------------------------------------------
 
@@ -173,9 +266,12 @@ class ExceptionStore:
             )
         sig = signature(params)  # raises on uncanonicalisable values
         grant = Grant(action_id, sig, datetime.now(timezone.utc))
-        with self._lock:
+        with self._lock, _FileLock(self._path):
+            # Reload inside the lock so this write cannot clobber a revoke
+            # another process made since we last read.
+            self._reload_locked()
             self._grants[(action_id, sig)] = grant
-            self._save()
+            self._save_locked()
         log.info("exception granted: %s", grant.describe())
         return grant
 
@@ -185,20 +281,22 @@ class ExceptionStore:
             key = (action_id, signature(params))
         except ExceptionRefused:
             return False
-        with self._lock:
+        with self._lock, _FileLock(self._path):
+            self._reload_locked()
             removed = self._grants.pop(key, None)
             if removed is not None:
-                self._save()
+                self._save_locked()
         if removed is not None:
             log.info("exception revoked: %s", removed.describe())
         return removed is not None
 
     def revoke_all(self) -> int:
         """Remove every exception. Returns how many were removed."""
-        with self._lock:
+        with self._lock, _FileLock(self._path):
+            self._reload_locked()
             count = len(self._grants)
             self._grants.clear()
-            self._save()
+            self._save_locked()
         log.info("all %d exceptions revoked", count)
         return count
 
@@ -211,18 +309,46 @@ class ExceptionStore:
         is one the user stops reading, which defeats §12.1.
         """
         known = set(known_action_ids)
-        with self._lock:
+        with self._lock, _FileLock(self._path):
+            self._reload_locked()
             dead = [k for k in self._grants if k[0] not in known]
             for k in dead:
                 self._grants.pop(k)
             if dead:
-                self._save()
+                self._save_locked()
         return len(dead)
 
     # -- persistence -------------------------------------------------------
 
-    def _load(self) -> None:
-        if not self._path.exists():
+    def _stamp_now(self) -> tuple[int, int] | None:
+        try:
+            st = self._path.stat()
+        except OSError:
+            return None
+        return (st.st_mtime_ns, st.st_size)
+
+    def _refresh_locked(self) -> None:
+        """Reload if the file changed since we last read it.
+
+        Caller holds the threading lock. No file lock: `_save_locked`
+        finishes with `os.replace`, which is atomic, so a reader gets
+        either the whole old file or the whole new one. Locking here would
+        serialise every dispatch against an idle CLI holding the lock.
+        """
+        if self._stamp_now() != self._stamp:
+            self._reload_locked()
+
+    def _reload_locked(self) -> None:
+        """Read the file into memory, replacing what was there.
+
+        Caller holds the threading lock. The in-memory dict is a view of
+        the file, never a separate authority — anything not on disk is not
+        a granted exception.
+        """
+        stamp = self._stamp_now()
+        self._grants.clear()
+        if stamp is None:
+            self._stamp = None
             return
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
@@ -234,15 +360,17 @@ class ExceptionStore:
             # means everything confirms. Loud, but safe.
             self._grants.clear()
             log.exception(
-                "exception store at %s is unreadable; starting empty "
+                "exception store at %s is unreadable; treating as empty "
                 "(every action will require confirmation)",
                 self._path,
             )
+        self._stamp = stamp
 
-    def _save(self) -> None:
-        """Atomic write. Caller holds the lock."""
+    def _save_locked(self) -> None:
+        """Atomic write. Caller holds the threading lock AND the file lock."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".json.tmp")
         payload = [g.to_json() for g in self._grants.values()]
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         os.replace(tmp, self._path)  # atomic on Windows and POSIX
+        self._stamp = self._stamp_now()
