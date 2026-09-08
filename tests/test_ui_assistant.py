@@ -31,6 +31,7 @@ from _helpers import build_engine  # noqa: F401  (path shim: puts src/ on sys.pa
 
 from actions.handlers import desktops
 from classifier.classify import NO_MATCH, Classification, Reason
+from policy.audit import AuditWriteFailed
 from policy.engine import ExecutionResult
 from policy.types import ActionRequest, Decision, RejectionCode, Source
 
@@ -609,3 +610,117 @@ def test_unmapped_rejection_code_falls_back_closed_not_to_success() -> None:
     assert message
     assert message.startswith(f"{assistant._UNMAPPED_REJECTION_MESSAGE}:")
     assert "declined" in message
+
+
+# --------------------------------------------------------------------------
+# KI-8: `AuditWriteFailed` -- raised by the real `PolicyEngine._finalize`
+# when the audit write itself fails, deliberately, rather than executing
+# unlogged (see `policy.audit.AuditWriteFailed`'s docstring) -- must be
+# reported distinctly, not swallowed by the blanket `except Exception` in
+# `_handle_hotkey`, and must not stop the hotkey from being serviced again.
+# `engine` is a bare `MagicMock` whose `.execute` RAISES rather than
+# returns, unlike `_messages_for_result`'s stub above. Same record-outside-
+# the-hook discipline as the rest of this file: `seen` is a list defined
+# outside `report`, and every assertion happens after `_handle_hotkey`
+# returns.
+# --------------------------------------------------------------------------
+
+
+def _audit_write_failed_engine(reason: str) -> MagicMock:
+    engine = MagicMock()
+    engine.execute = MagicMock(side_effect=AuditWriteFailed(reason))
+    return engine
+
+
+def test_audit_write_failed_names_the_audit_log_and_the_reason() -> None:
+    reason = "could not write audit record: [Errno 28] No space left on device"
+    engine = _audit_write_failed_engine(reason)
+    seen: list[str] = []
+
+    _handle_hotkey(
+        engine,
+        classify=lambda text: _MATCHED,
+        input_box_factory=_stub_input_box("shut down"),
+        report=seen.append,
+    )
+
+    engine.execute.assert_called_once()
+    message = seen[-1]
+
+    # Names the audit log specifically -- not a generic error string.
+    assert "audit log" in message.lower()
+    # The underlying reason (disk-full vs. permission-denied) must survive
+    # -- a message that says "audit log failed" while dropping the cause
+    # would pass a weaker check but fails this one.
+    assert "[Errno 28] No space left on device" in message
+
+
+def test_audit_write_failed_is_distinguishable_from_handler_error_and_rejections() -> None:
+    reason = "could not write audit record: [Errno 28] No space left on device"
+    engine = _audit_write_failed_engine(reason)
+    seen: list[str] = []
+
+    _handle_hotkey(
+        engine,
+        classify=lambda text: _MATCHED,
+        input_box_factory=_stub_input_box("shut down"),
+        report=seen.append,
+    )
+    audit_message = seen[-1]
+
+    # Compare against actual messages produced through the same
+    # `_handle_hotkey`/`report` path, not against hardcoded strings.
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    success_message = _last_message_for_result(
+        ExecutionResult(Decision.auto_allow(request, "tier 0"), executed=True)
+    )
+    handler_error_message = _last_message_for_result(
+        ExecutionResult(
+            Decision.auto_allow(request, "tier 0"),
+            executed=True,
+            error="RuntimeError('handler exploded')",
+        )
+    )
+    rejection_message = _last_message_for_result(
+        _rejected_result(RejectionCode.NOT_CONFIRMED, "declined or not confirmed")
+    )
+
+    assert audit_message != success_message
+    assert audit_message != handler_error_message
+    assert audit_message != rejection_message
+    # Never reads as success.
+    assert "done:" not in audit_message
+    assert "ran but failed" not in audit_message  # not the handler-error shape
+
+    # Conveys that this blocks every action, not one bad request. `and`,
+    # not `or`: the message already begins "blocked:", so an `or` is
+    # satisfied by that prefix alone and would still pass if the "every
+    # action" framing were dropped -- which is the half that tells the user
+    # the assistant is non-functional until they fix the underlying cause.
+    assert (
+        "every action" in audit_message.lower()
+        and "blocked" in audit_message.lower()
+    )
+
+
+def test_audit_write_failed_does_not_stop_the_hotkey_from_being_serviced_again() -> None:
+    """The listener must survive: a second press with the same failing
+    engine is still serviced (not merely "did not raise once") and still
+    reports the same kind of message."""
+    reason = "could not write audit record: [Errno 13] Permission denied"
+    engine = _audit_write_failed_engine(reason)
+    seen: list[str] = []
+
+    for _ in range(2):
+        _handle_hotkey(
+            engine,
+            classify=lambda text: _MATCHED,
+            input_box_factory=_stub_input_box("shut down"),
+            report=seen.append,
+        )
+
+    assert engine.execute.call_count == 2
+    audit_messages = [m for m in seen if "audit log" in m.lower()]
+    assert len(audit_messages) == 2
+    assert "[Errno 13] Permission denied" in audit_messages[0]
+    assert "[Errno 13] Permission denied" in audit_messages[1]

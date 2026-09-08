@@ -3,6 +3,13 @@
 Open defects and deferred work. Findings resolved here get deleted, not
 struck through — git history is the record.
 
+Reference code by function or class name, not line number. Line numbers
+drift with every commit and this file has already been wrong once: KI-8
+cited assistant.py:473, which after the KI-3 commit was a docstring in a
+different function. This is the same defect class as the hardcoded
+description lists, the HONESTY banner, and the copied __init__.py
+docstring — an assertion that was true when written, with nothing to
+notice when it stopped being.
 ## Open
 
 
@@ -44,17 +51,3 @@ place that lists the codes, not one table.
 Not urgent. The guard in assistant.py catches the half that matters most.
 Same defect class as the hardcoded description lists and the HONESTY
 banner: a second copy of a truth that nothing checks.
-
-### KI-8 — AuditWriteFailed swallowed in assistant.py  (MEDIUM)
-`except Exception` at assistant.py:473 catches AuditWriteFailed, which
-`PolicyEngine._finalize` deliberately re-raises rather than executing
-unlogged. The design says: no log, no action — disk-full stops the
-assistant rather than silently downgrading it to unaudited operation.
-
-The refusal still happens, so this is not fail-open. But the user sees a
-generic error instead of "blocked because the audit log could not be
-written", which is the one message that tells them the assistant is
-non-functional until they free disk space. An unactionable error on a
-condition with an obvious action.
-
-Changes behaviour rather than display, so it was out of scope for KI-3.

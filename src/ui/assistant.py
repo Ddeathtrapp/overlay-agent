@@ -97,7 +97,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from actions import REGISTRY  # noqa: E402
-from policy.audit import AuditLog  # noqa: E402
+from policy.audit import AuditLog, AuditWriteFailed  # noqa: E402
 from policy.engine import ExecutionResult, PolicyEngine  # noqa: E402
 from policy.exceptions import ExceptionStore  # noqa: E402
 from policy.types import Decision, RejectionCode, Source  # noqa: E402
@@ -466,6 +466,22 @@ _REJECTION_MESSAGES: dict[RejectionCode, str] = {
 
 _UNMAPPED_REJECTION_MESSAGE = "rejected"
 
+# KI-8: `AuditWriteFailed` is not a rejection and not a handler error -- it
+# means `policy.engine.PolicyEngine._finalize` never got as far as deciding
+# anything, because it could not write the `decision` record first (see
+# `AuditWriteFailed`'s own docstring in `policy/audit.py`: no log, no
+# action, deliberately). It also is not a one-off: the same write will fail
+# the same way on every subsequent press until the underlying condition
+# (almost always disk-full) is fixed, so the message says so rather than
+# reading like an ordinary, isolated failure. "audit log" is named
+# explicitly, and `exc` is interpolated -- `AuditWriteFailed.__str__`
+# already embeds the `OSError` text (`audit.py`:424), e.g. disk-full vs.
+# permission-denied, which call for different fixes from the user.
+_AUDIT_WRITE_FAILED_MESSAGE = (
+    "blocked: could not write to the audit log ({exc}) -- every action is "
+    "blocked, not just this one, until this is fixed"
+)
+
 
 def _rejection_message(decision: Decision) -> str:
     """User-facing text for a REJECTED `Decision`.
@@ -524,17 +540,24 @@ def _handle_hotkey(
     about how `engine.execute` is called changes here -- this only reads
     the `ExecutionResult` it already returned.
 
+    `AuditWriteFailed` -- raised by `policy.engine.PolicyEngine._finalize`
+    when the audit write itself fails, deliberately, rather than executing
+    unlogged (see `AuditWriteFailed`'s docstring in `policy/audit.py`) -- is
+    caught separately below, ABOVE the blanket `except Exception` (KI-8).
+    It used to fall into that blanket handler and become a silent,
+    logged-only failure indistinguishable from a NO_MATCH; now `report`
+    gets `_AUDIT_WRITE_FAILED_MESSAGE`, which names the audit log, carries
+    `exc` (disk-full and permission-denied read differently and call for
+    different fixes), and says every action is blocked until it is fixed,
+    not just this one.
+
     Never raises out to the message loop -- a rendering or classification
     failure here must not take down the hotkey for the rest of the
     process, the same "never let a UI failure escalate" rule
     `confirm_dialog.DesktopConfirmer.ask()` follows for the confirmation
-    dialog. This also means an `AuditWriteFailed` raised from inside
-    `engine.execute` (`policy/engine.py`'s `_finalize` re-raises it
-    deliberately, to refuse to execute unlogged) is caught here by the
-    same blanket `except Exception` and turns into a silent, logged-only
-    failure -- see KI-3's follow-up note in this task's report; narrowing
-    that except is a separate, deliberate behaviour change and is not
-    made here.
+    dialog. The blanket `except Exception` below stays broad on purpose --
+    narrowing it further is a separate, deliberate behaviour change and is
+    not made here.
     """
     try:
         box = input_box_factory()
@@ -565,6 +588,15 @@ def _handle_hotkey(
             utterance=outcome.utterance,
         )
         report(_execution_message(result))
+    except AuditWriteFailed as exc:
+        # `_finalize` re-raised this on purpose (see `AuditWriteFailed`'s
+        # docstring): the request was never logged, so it never ran. Must
+        # not be swallowed by the blanket handler below, which would leave
+        # the user thinking their command silently vanished rather than
+        # knowing the assistant is non-functional until they free disk
+        # space (or fix whatever `exc` names) -- that is the KI-8 fix.
+        log.exception("audit write failed; hotkey press blocked")
+        report(_AUDIT_WRITE_FAILED_MESSAGE.format(exc=exc))
     except Exception:
         log.exception("unhandled error while handling a hotkey press")
 
