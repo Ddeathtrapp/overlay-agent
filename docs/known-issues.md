@@ -28,9 +28,6 @@ Windows does queue and replay them. Same defect class as the hardcoded
 HONESTY banner and the copied `__init__.py` docstring: prose assertions
 that nothing verifies.
 
-### KI-6 — No test drives two concurrent execute() calls  (MEDIUM)
-`_pending_confirmation` has no coverage. It was unreachable until the
-CONFIRMATION_PENDING enum fix; it is still untested.
 
 ### KI-7 — RejectionCode mapped in two places  (LOW)
 `cli.py` maps RejectionCode to exit codes; `ui/assistant.py` maps the same

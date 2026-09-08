@@ -33,6 +33,8 @@ from actions.params import SettingPage
 from dispatch import cli
 from policy.audit import AuditLog
 from policy.confirm import ConfirmationReply
+from policy.engine import ExecutionResult
+from policy.types import ActionRequest, Decision, RejectionCode, Source
 
 OK, HANDLER_ERROR, REJECTED, NOT_CONFIRMED, RATE_LIMITED = 0, 1, 2, 3, 4
 
@@ -314,3 +316,76 @@ def test_exceptions_revoke_all_audits_each_grant_before_the_summary(
     assert AuditLog(audit_path).verify_chain()
 
     assert store.list() == []
+
+
+# --------------------------------------------------------------------------
+# KI-7: `RejectionCode` -> exit code mapping in `cli.py` -- a second,
+# independent enumeration of the same set `ui/assistant.py` maps to
+# user-facing text. `assistant.py` has a drift guard
+# (test_ui_assistant.py::test_every_rejection_code_is_handled_with_an_explicit_message);
+# `cli.py` had none, so a new `RejectionCode` member fell through
+# `_exit_code`'s `except KeyError: return 2` silently. These two tests are
+# the companion guard for `cli._REJECTION_EXIT_CODES`, copying the shape of
+# the assistant.py pair rather than merging the two tables (codomains
+# differ: ints here, text there).
+# --------------------------------------------------------------------------
+
+
+def test_every_rejection_code_has_an_explicit_nonzero_exit_code() -> None:
+    """The drift guard: iterate the live `RejectionCode` enum, not a
+    hardcoded list, so adding an eighth member without updating
+    `cli._REJECTION_EXIT_CODES` fails this test immediately instead of
+    silently falling through `_exit_code`'s `except KeyError: return 2`.
+
+    A value-based "did it fall through to the fallback" check (as used in
+    `test_ui_assistant.py`) does not work here: the fallback value, 2, is
+    also the legitimate mapped value for UNKNOWN_ACTION, BAD_ARITY, and
+    PARAM_REJECTED, so an unmapped code and a correctly-mapped code can
+    both return 2. The only reliable check is membership in the dict
+    itself, plus asserting every mapped value is nonzero so an unmapped
+    or mis-mapped code can never read as `result.ok` (exit 0 / success).
+    """
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+
+    for code in RejectionCode:
+        assert code in cli._REJECTION_EXIT_CODES, (
+            f"{code!r} has no entry in cli._REJECTION_EXIT_CODES -- "
+            "KI-7 drift guard tripped"
+        )
+        assert cli._REJECTION_EXIT_CODES[code] != 0, (
+            f"{code!r} maps to exit code 0, which reads as success"
+        )
+
+        decision = Decision.reject(request, code, f"reason text for {code.value}")
+        result = ExecutionResult(decision=decision, executed=False, error=None)
+        exit_code = cli._exit_code(result)
+
+        assert exit_code == cli._REJECTION_EXIT_CODES[code]
+        assert exit_code != 0
+
+
+def test_unmapped_rejection_code_falls_back_closed_not_to_success() -> None:
+    """A `RejectionCode` absent from `_REJECTION_EXIT_CODES` (simulated here
+    with a real code temporarily deleted from the dict) must still produce a
+    nonzero exit code -- never 0, which is indistinguishable from success.
+
+    `NOT_CONFIRMED` is deleted rather than `UNKNOWN_ACTION`: `UNKNOWN_ACTION`
+    legitimately maps to the same fallback value (2) that `_exit_code`'s
+    `except KeyError` also returns, so deleting it would prove nothing.
+    `NOT_CONFIRMED` maps to 3, so seeing 2 after deletion is proof the
+    lookup actually fell through the `except KeyError` clause.
+    """
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    decision = Decision.reject(request, RejectionCode.NOT_CONFIRMED, "declined")
+    result = ExecutionResult(decision=decision, executed=False, error=None)
+
+    original = dict(cli._REJECTION_EXIT_CODES)
+    del cli._REJECTION_EXIT_CODES[RejectionCode.NOT_CONFIRMED]
+    try:
+        exit_code = cli._exit_code(result)
+    finally:
+        cli._REJECTION_EXIT_CODES.clear()
+        cli._REJECTION_EXIT_CODES.update(original)
+
+    assert exit_code == 2
+    assert exit_code != 0

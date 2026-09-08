@@ -39,16 +39,28 @@ only one that ever calls `engine.execute`:
     `engine.execute` — it reuses the mechanism `confirm_dialog.py` already
     built, exactly as instructed. The hotkey thread is simply blocked (in
     `PolicyEngine._ask_with_timeout`'s `thread.join(...)`) for the
-    duration, so at no point do two Tk roots exist at once anywhere in the
-    process.
+    duration, so normally at most one Tk root exists at a time. That is
+    not guaranteed, though: if `join(timeout_seconds)` expires before the
+    dialog's own root is destroyed, the hotkey thread resumes with that
+    root still alive on the daemon thread, and the next `InputBox` then
+    creates a second one — see `docs/known-issues.md` KI-4 for how the
+    dialog's deadline can outlast the timeout.
 
   * **Dispatch is synchronous, on purpose.** `_handle_hotkey` calls
     `engine.execute` directly and waits for it (including waiting out any
     confirmation). While that call is in flight the hotkey thread is not
     back at `GetMessageW`, so a second hotkey press arriving during
     classification or a confirmation is not acted on until the loop
-    returns to pump messages again — it is not queued and replayed as a
-    fresh request. This is deliberate: it mirrors `policy/engine.py` §12.4
+    returns to pump messages again. `RegisterHotKey(hWnd=NULL, ...)` binds
+    the hotkey to this thread's message queue rather than a window, so
+    `WM_HOTKEY` is posted as a thread message and stays queued while this
+    thread is blocked elsewhere; `_win32_message_loop` retrieves it (and
+    any others that queued up) once it is back at `GetMessageW`, and calls
+    `on_hotkey()` for each in turn — see `_win32_message_loop` and
+    `_register_hotkey`. So a press during dispatch is not dropped and not
+    coalesced with others; it is deferred until the loop resumes, then
+    handled as its own `on_hotkey()` call, in order. This deferral is
+    deliberate: it mirrors `policy/engine.py` §12.4
     ("no two handlers run at once" — the gate), so the UI layer never lets
     two dispatches race even though the engine's own gate is released
     during phase B (see `engine.py`'s module docstring). It is a
@@ -193,8 +205,15 @@ def build_default_engine() -> PolicyEngine:
     Uses `DesktopConfirmer` (this Phase's tkinter confirmation dialog),
     never `ConsoleConfirmer` — `dispatch.cli._runtime()` builds a
     `ConsoleConfirmer`, which blocks on `input()`; in a GUI process with no
-    console attached that hangs forever holding the engine's `_gate`
-    (policy/engine.py). See the TRAP note this module was built against.
+    console attached, `input()` has nothing to read and blocks
+    indefinitely. That does not hold the engine's `_gate` (`_run` releases
+    it, in `policy/engine.py`, before calling `_ask`) and it does not hang
+    "forever" in the strict sense (`_ask_with_timeout` bounds the wait at
+    `prompt.timeout_seconds` and gives up on the confirmer's thread) — but
+    a hotkey process has no console to begin with, so `ConsoleConfirmer`
+    would sit blocked on `input()` for the full timeout on every single
+    confirmation, with the human never seeing a prompt to answer. Use
+    `DesktopConfirmer` here for that reason.
 
     Default `ExceptionStore()` / `AuditLog()` paths are correct here, same
     as `dispatch.cli._runtime()`'s bare construction is correct for the
