@@ -31,7 +31,8 @@ from _helpers import build_engine  # noqa: F401  (path shim: puts src/ on sys.pa
 
 from actions.handlers import desktops
 from classifier.classify import NO_MATCH, Classification, Reason
-from policy.types import Source
+from policy.engine import ExecutionResult
+from policy.types import ActionRequest, Decision, RejectionCode, Source
 
 import ui.assistant as assistant
 from ui.assistant import InputBox, _handle_hotkey, run
@@ -452,3 +453,159 @@ def test_default_classify_uses_the_real_registry_and_never_imports_eagerly() -> 
         result = assistant._default_classify("open notepad")
 
     assert result.detail == "open notepad"
+
+
+# --------------------------------------------------------------------------
+# KI-3: `engine.execute`'s `ExecutionResult` is no longer discarded --
+# every distinct outcome shape must produce a distinguishable, non-empty
+# message through `report`. The engine is always a stub here (a bare
+# `MagicMock` whose `.execute` returns a canned `ExecutionResult`) -- no
+# real `PolicyEngine`, no live model, no window. Record everything into a
+# list OUTSIDE the callback and assert after `_handle_hotkey` returns --
+# no `assert` inside `report` itself, matching the `DesktopConfirmer.ask`
+# lesson noted in the module docstring above.
+# --------------------------------------------------------------------------
+
+_MATCHED = Classification(action_id="shutdown", raw_params={}, reason=Reason.MATCHED)
+
+
+def _messages_for_result(result: ExecutionResult) -> list[str]:
+    engine = MagicMock()
+    engine.execute = MagicMock(return_value=result)
+    seen: list[str] = []
+
+    _handle_hotkey(
+        engine,
+        classify=lambda text: _MATCHED,
+        input_box_factory=_stub_input_box("shut down"),
+        report=seen.append,
+    )
+
+    engine.execute.assert_called_once()
+    return seen
+
+
+def _last_message_for_result(result: ExecutionResult) -> str:
+    messages = _messages_for_result(result)
+    # `report(classification.describe())` fires first, then the execution
+    # message -- the one this section is about is always the last one.
+    return messages[-1]
+
+
+def _rejected_result(code: RejectionCode, reason: str) -> ExecutionResult:
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    return ExecutionResult(Decision.reject(request, code, reason))
+
+
+def test_successful_execution_is_reported() -> None:
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    result = ExecutionResult(Decision.auto_allow(request, "tier 0"), executed=True)
+
+    message = _last_message_for_result(result)
+
+    assert result.ok
+    assert "shutdown" in message
+
+
+def test_allowed_but_handler_raised_is_reported_and_distinct_from_success() -> None:
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    success = ExecutionResult(Decision.auto_allow(request, "tier 0"), executed=True)
+    handler_error = ExecutionResult(
+        Decision.auto_allow(request, "tier 0"),
+        executed=True,
+        error="RuntimeError('handler exploded')",
+    )
+
+    success_message = _last_message_for_result(success)
+    error_message = _last_message_for_result(handler_error)
+
+    assert not handler_error.ok
+    assert error_message != success_message
+    assert "handler exploded" in error_message
+
+
+def test_not_confirmed_rate_limited_and_confirmation_pending_are_distinguishable() -> None:
+    """The four rejection situations named in the task (declined, blocked
+    by an open confirmation, rate limited with a retry duration, and
+    malformed) must not collapse into one generic "rejected" string."""
+    not_confirmed = _rejected_result(
+        RejectionCode.NOT_CONFIRMED, "declined or not confirmed"
+    )
+    rate_limited = _rejected_result(
+        RejectionCode.RATE_LIMITED,
+        "shutdown is rate limited at 1 per 600s; retry in 42s",
+    )
+    confirmation_pending = _rejected_result(
+        RejectionCode.CONFIRMATION_PENDING,
+        "a confirmation is already awaiting an answer",
+    )
+    bad_arity = _rejected_result(
+        RejectionCode.BAD_ARITY, "shutdown takes [], got ['bogus']"
+    )
+
+    messages = {
+        "not_confirmed": _last_message_for_result(not_confirmed),
+        "rate_limited": _last_message_for_result(rate_limited),
+        "confirmation_pending": _last_message_for_result(confirmation_pending),
+        "bad_arity": _last_message_for_result(bad_arity),
+    }
+
+    # Distinguishable: every message differs from every other one --
+    # not merely "each is non-empty", which a single shared "rejected"
+    # string would also satisfy.
+    assert len(set(messages.values())) == len(messages)
+
+    # RATE_LIMITED must surface the actionable retry-after duration
+    # (LimitStatus.reason(), policy/limits.py:63-67), not just the label.
+    assert "42s" in messages["rate_limited"]
+
+    # NOT_CONFIRMED reads as a decline, not as any of the others.
+    assert "declined" in messages["not_confirmed"].lower()
+    assert "42s" not in messages["not_confirmed"]
+
+    # CONFIRMATION_PENDING reads as "you weren't asked", not a decline.
+    assert "confirmation" in messages["confirmation_pending"].lower()
+    assert messages["confirmation_pending"] != messages["not_confirmed"]
+
+
+def test_every_rejection_code_is_handled_with_an_explicit_message() -> None:
+    """The drift guard: iterate the live `RejectionCode` enum, not a
+    hardcoded list, so adding an eighth member without updating
+    `assistant._REJECTION_MESSAGES` fails this test immediately instead of
+    silently rendering as the generic fallback (or, worse, as success)."""
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+
+    for code in RejectionCode:
+        assert code in assistant._REJECTION_MESSAGES, (
+            f"{code!r} has no entry in ui.assistant._REJECTION_MESSAGES -- "
+            "KI-3 drift guard tripped"
+        )
+        decision = Decision.reject(request, code, f"reason text for {code.value}")
+        message = assistant._rejection_message(decision)
+
+        assert message, f"{code!r} produced an empty message"
+        assert not message.startswith(f"{assistant._UNMAPPED_REJECTION_MESSAGE}:"), (
+            f"{code!r} fell through to the closed fallback"
+        )
+        assert f"reason text for {code.value}" in message
+
+
+def test_unmapped_rejection_code_falls_back_closed_not_to_success() -> None:
+    """A `RejectionCode` absent from `_REJECTION_MESSAGES` (simulated here
+    with a real code temporarily deleted from the dict) must still render
+    a non-empty, clearly-rejected message -- never blank, never a message
+    indistinguishable from success."""
+    request = ActionRequest(action_id="shutdown", raw_params={}, source=Source.DESKTOP)
+    decision = Decision.reject(request, RejectionCode.NOT_CONFIRMED, "declined")
+
+    original = dict(assistant._REJECTION_MESSAGES)
+    del assistant._REJECTION_MESSAGES[RejectionCode.NOT_CONFIRMED]
+    try:
+        message = assistant._rejection_message(decision)
+    finally:
+        assistant._REJECTION_MESSAGES.clear()
+        assistant._REJECTION_MESSAGES.update(original)
+
+    assert message
+    assert message.startswith(f"{assistant._UNMAPPED_REJECTION_MESSAGE}:")
+    assert "declined" in message

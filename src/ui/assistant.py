@@ -98,9 +98,9 @@ if str(_SRC) not in sys.path:
 
 from actions import REGISTRY  # noqa: E402
 from policy.audit import AuditLog  # noqa: E402
-from policy.engine import PolicyEngine  # noqa: E402
+from policy.engine import ExecutionResult, PolicyEngine  # noqa: E402
 from policy.exceptions import ExceptionStore  # noqa: E402
-from policy.types import Source  # noqa: E402
+from policy.types import Decision, RejectionCode, Source  # noqa: E402
 
 from ui.confirm_dialog import DesktopConfirmer  # noqa: E402
 
@@ -422,6 +422,88 @@ class InputBox:
 
 
 # ----------------------------------------------------------------------
+# Execution -- the display seam for `ExecutionResult` (KI-3)
+# ----------------------------------------------------------------------
+# `engine.execute(...)` used to be called for its side effect only and the
+# `ExecutionResult` it returned was discarded (`docs/known-issues.md`
+# KI-3): a rate-limited shutdown, typed AFTER the tier-2 challenge word,
+# looked exactly like a successful one -- both were silent. `report` is
+# the display seam; `_handle_hotkey` below now feeds it the outcome.
+#
+# Mirrors `dispatch/cli.py`'s `_REJECTION_EXIT_CODES` discipline -- a
+# dict, not an if-chain, keyed by `RejectionCode`, with an explicit closed
+# fallback -- but maps to user-facing TEXT rather than an exit code, so
+# this is not a literal duplicate of that table and is not built by
+# importing from it: `cli.py` is registry-engineer's, read-only from here,
+# and its dict is `_REJECTION_EXIT_CODES`'s private, CLI-specific shape
+# anyway. If a single shared RejectionCode -> text mapping is ever wanted,
+# it belongs in `policy/types.py` next to `RejectionCode` itself (the one
+# module both `cli.py` and this one already import from), not in either
+# CLI/UI module and not by reaching into one module's private dict from
+# the other. Not attempted here -- `cli.py` is out of scope for this task.
+#
+# Per-code, not per-group: "you declined", "you weren't asked because
+# another confirmation is open", "rate limited, retry in Ns", and
+# "malformed request" are four different situations calling for four
+# different user reactions, so each `RejectionCode` gets its own label
+# below instead of being lumped by a shared branch. `decision.reason` is
+# always appended -- for RATE_LIMITED that is `LimitStatus.reason()`
+# (`policy/limits.py:63-67`), which already carries the concrete
+# retry-after duration; "rate limited" with no number would be exactly
+# the unhelpful message this fix exists to replace.
+
+_REJECTION_MESSAGES: dict[RejectionCode, str] = {
+    RejectionCode.UNKNOWN_ACTION: "unrecognized action",
+    RejectionCode.BAD_ARITY: "malformed request",
+    RejectionCode.PARAM_REJECTED: "malformed request",
+    RejectionCode.RATE_LIMITED: "rate limited",
+    RejectionCode.NOT_CONFIRMED: "you declined",
+    RejectionCode.NO_CONFIRMER: "no confirmation prompt is available",
+    RejectionCode.CONFIRMATION_PENDING: (
+        "you weren't asked -- another confirmation is already open"
+    ),
+}
+
+_UNMAPPED_REJECTION_MESSAGE = "rejected"
+
+
+def _rejection_message(decision: Decision) -> str:
+    """User-facing text for a REJECTED `Decision`.
+
+    A dict lookup with an explicit `except KeyError` fallback, not
+    `.get(..., ...)` -- same discipline as `cli._exit_code`'s lookup into
+    `_REJECTION_EXIT_CODES` -- so an unmapped `RejectionCode` (e.g. an
+    eighth member added to the enum without updating `_REJECTION_MESSAGES`
+    here) reads as a generic rejection rather than raising out of a
+    display function, and never as success or an empty string.
+    `decision.reason` is always appended, so even an unmapped code still
+    surfaces the engine's own explanation of what happened.
+    """
+    try:
+        label = _REJECTION_MESSAGES[decision.code]
+    except KeyError:
+        label = _UNMAPPED_REJECTION_MESSAGE
+    return f"{label}: {decision.reason}"
+
+
+def _execution_message(result: ExecutionResult) -> str:
+    """User-facing text for one `ExecutionResult`.
+
+    Three visibly distinct shapes (KI-3): executed successfully; allowed
+    but the handler raised; rejected (delegated to `_rejection_message`
+    for the per-`RejectionCode` split). Display only -- this never changes
+    what the engine decided and never retries anything.
+    """
+    if result.ok:
+        return f"done: {result.decision.request.action_id}"
+    if result.executed:
+        # Allowed to run; the handler itself raised. `result.error` is a
+        # `repr(exc)` string set by `PolicyEngine._finalize`.
+        return f"{result.decision.request.action_id} ran but failed: {result.error}"
+    return _rejection_message(result.decision)
+
+
+# ----------------------------------------------------------------------
 # Orchestration
 # ----------------------------------------------------------------------
 
@@ -436,11 +518,23 @@ def _handle_hotkey(
     """One hotkey press, start to finish. Runs on the hotkey thread; see
     the module docstring's "Threading" section.
 
+    `report` is given the outcome of every dispatch, not merely the
+    classification: `_execution_message` distinguishes success from an
+    allowed-but-raised handler from each `RejectionCode` (KI-3). Nothing
+    about how `engine.execute` is called changes here -- this only reads
+    the `ExecutionResult` it already returned.
+
     Never raises out to the message loop -- a rendering or classification
     failure here must not take down the hotkey for the rest of the
     process, the same "never let a UI failure escalate" rule
     `confirm_dialog.DesktopConfirmer.ask()` follows for the confirmation
-    dialog.
+    dialog. This also means an `AuditWriteFailed` raised from inside
+    `engine.execute` (`policy/engine.py`'s `_finalize` re-raises it
+    deliberately, to refuse to execute unlogged) is caught here by the
+    same blanket `except Exception` and turns into a silent, logged-only
+    failure -- see KI-3's follow-up note in this task's report; narrowing
+    that except is a separate, deliberate behaviour change and is not
+    made here.
     """
     try:
         box = input_box_factory()
@@ -464,12 +558,13 @@ def _handle_hotkey(
         # produced, so that is what reaches the audit record via
         # `policy.audit._safe_utterance` (DESKTOP is trusted, so it is
         # logged).
-        engine.execute(
+        result = engine.execute(
             classification.action_id,
             classification.raw_params,
             source=Source.DESKTOP,
             utterance=outcome.utterance,
         )
+        report(_execution_message(result))
     except Exception:
         log.exception("unhandled error while handling a hotkey press")
 
