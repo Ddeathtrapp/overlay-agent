@@ -10,12 +10,9 @@ different function. This is the same defect class as the hardcoded
 description lists, the HONESTY banner, and the copied __init__.py
 docstring — an assertion that was true when written, with nothing to
 notice when it stopped being.
+
 ## Open
 
-
-### KI-3 — ExecutionResult discarded in assistant.py:473  (MEDIUM)
-A rate-limited shutdown, after the user has typed the challenge word, is
-silent and indistinguishable from success.
 
 ### KI-4 — Dialog deadline vs Tk init and modal move loop  (MEDIUM)
 The self-close deadline is computed after `_create_root()`, so the real

@@ -394,11 +394,25 @@ class PolicyEngine:
         if Confirmer.may_remember(prompt, reply):
             try:
                 self._exceptions.grant(action.id, tier, parsed)
-                self._audit.note("exception_granted", {"action_id": action.id})
             except ExceptionRefused:
                 # A refused grant must not turn an approved action into a
                 # rejected one — the human said yes to THIS invocation.
                 log.warning("could not store exception for %s", action.id)
+            else:
+                try:
+                    self._audit.note("exception_granted", {"action_id": action.id})
+                except AuditWriteFailed:
+                    # The grant is already on disk. Losing its note is bad —
+                    # §12.1 makes the exception list a security contract and
+                    # this is how a grant enters the record — but raising
+                    # here would escape execute() entirely, breaking the
+                    # ExecutionResult contract on a path where the human
+                    # already approved. _finalize's audit write is the one
+                    # that must be fatal; this one is not.
+                    log.exception(
+                        "exception granted for %s but its audit note failed",
+                        action.id,
+                    )
 
         return Decision.confirmed(request)
 
